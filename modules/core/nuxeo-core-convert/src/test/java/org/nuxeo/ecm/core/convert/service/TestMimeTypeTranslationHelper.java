@@ -1,5 +1,5 @@
 /*
- * (C) Copyright 2018 Nuxeo (http://nuxeo.com/) and others.
+ * (C) Copyright 2018-2021 Nuxeo (http://nuxeo.com/) and others.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -75,6 +75,15 @@ public class TestMimeTypeTranslationHelper {
         converterNames = mimeTypeTranslationHelper.getConverterNames("image/png", "image/jpg");
         assertEquals(1, converterNames.size());
         assertEquals("toJpg1", converterNames.get(0));
+    }
+
+    // NXP-30483
+    @Test
+    @Deploy("org.nuxeo.ecm.core.convert:OSGI-INF/converters-test-contrib9.xml")
+    public void testGetConverterNamesWithSrcMatchingExactlyButNotDstWhereasSrcWithSubWildcardAndDstMatch() {
+        List<String> converterNames = mimeTypeTranslationHelper.getConverterNames("image/tiff", "application/pdf");
+        assertEquals(1, converterNames.size());
+        assertTrue(converterNames.contains("image2Pdf"));
     }
 
     @Test

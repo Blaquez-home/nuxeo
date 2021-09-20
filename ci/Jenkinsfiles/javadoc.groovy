@@ -42,6 +42,12 @@ void setGitHubBuildStatus(String context, String message, String state) {
   }
 }
 
+String getCurrentNamespace() {
+  container('maven') {
+    return sh(returnStdout: true, script: "kubectl get pod ${NODE_NAME} -ojsonpath='{..namespace}'")
+  }
+}
+
 String getVersion() {
   return "${BRANCH_NAME}-" + readMavenPom().getVersion()
 }
@@ -51,9 +57,10 @@ pipeline {
     label 'jenkins-nuxeo-package-11'
   }
   options {
-    timeout(time: 1, unit: 'HOURS')
+    timeout(time: 3, unit: 'HOURS')
   }
   environment {
+    CURRENT_NAMESPACE = getCurrentNamespace()
     // force ${HOME}=/root - for an unexplained reason, ${HOME} is resolved as /home/jenkins though sh 'env' shows HOME=/root
     HOME = '/root'
     // set Xmx lower than pod memory limit of 3Gi, to leave some memory for javadoc command
@@ -124,7 +131,7 @@ pipeline {
           Build Javadoc
           ----------------------------------------"""
           echo "MAVEN_OPTS=$MAVEN_OPTS"
-          sh "mvn ${MAVEN_ARGS} -V -T4C -Pjavadoc -DskipTests install"
+          sh "mvn ${MAVEN_ARGS} -V -Pjavadoc -DskipTests install"
           sh "mvn ${MAVEN_ARGS} -f server/pom.xml -Pjavadoc -DskipTests install"
         }
       }
@@ -182,7 +189,10 @@ pipeline {
           Image tag: ${VERSION}"""
           sh "mv target/site/apidocs ci/docker/javadoc/apidocs"
           dir('ci/docker/javadoc') {
-            sh "skaffold build -f skaffold.yaml"
+            sh '''
+              envsubst < skaffold.yaml > skaffold.yaml~gen
+              skaffold build -f skaffold.yaml~gen
+            '''
           }
 
           echo """

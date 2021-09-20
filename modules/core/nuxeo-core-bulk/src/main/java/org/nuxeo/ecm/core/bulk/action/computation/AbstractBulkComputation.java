@@ -18,10 +18,12 @@
  */
 package org.nuxeo.ecm.core.bulk.action.computation;
 
+import static java.util.Objects.requireNonNullElse;
 import static org.nuxeo.ecm.core.api.security.SecurityConstants.SYSTEM_USERNAME;
 import static org.nuxeo.ecm.core.bulk.message.BulkStatus.State.ABORTED;
 
 import java.io.Serializable;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -95,22 +97,22 @@ public abstract class AbstractBulkComputation extends AbstractComputation {
             delta.setProcessingStartTime(Instant.now());
             delta.setProcessed(bucket.getIds().size());
             startBucket(record.getKey());
-            for (List<String> batch : Lists.partition(bucket.getIds(), command.getBatchSize())) {
-                processBatchOfDocuments(batch);
+            try {
+                for (List<String> batch : Lists.partition(bucket.getIds(), command.getBatchSize())) {
+                    processBatchOfDocuments(batch);
+                }
+            } finally {
+                delta.setProcessingEndTime(Instant.now());
             }
-            delta.setProcessingEndTime(Instant.now());
             endBucket(context, delta);
-            context.askForCheckpoint();
         } else {
             if (isAbortedCommand(bucket.getCommandId())) {
                 log.debug("Skipping aborted command: {}", bucket.getCommandId());
-                context.askForCheckpoint();
             } else {
-                // this requires a manual intervention, the kv store might have been lost
-                throw new IllegalStateException(String.format("Unknown command: %s, offset: %s, record: %s.",
-                        bucket.getCommandId(), context.getLastOffset(), record));
+                log.warn("Skipping unknown command: {}, offset: {}.",bucket.getCommandId(), context.getLastOffset());
             }
         }
+        context.askForCheckpoint();
     }
 
     protected boolean isAbortedCommand(String commandId) {
@@ -133,7 +135,10 @@ public abstract class AbstractBulkComputation extends AbstractComputation {
         if (batch == null || batch.isEmpty()) {
             return;
         }
-        TransactionHelper.runInTransaction(() -> {
+        int timeout = (int) requireNonNullElse(getBatchTransactionTimeout(), Duration.ZERO).toSeconds();
+        log.debug("The computation: {} is about to start a transaction with timeout: {}s to process the batch: {}",
+                metadata::name, () -> timeout, () -> batch);
+        TransactionHelper.runInTransaction(timeout, () -> {
             try {
                 String username = command.getUsername();
                 String repository = command.getRepository();
@@ -145,6 +150,13 @@ public abstract class AbstractBulkComputation extends AbstractComputation {
                 throw new NuxeoException(e);
             }
         });
+    }
+
+    /**
+     * @return the transaction timeout to use to process the bucket, &lt;= 0 for the default
+     */
+    protected Duration getBatchTransactionTimeout() {
+        return command.getBatchTransactionTimeout();
     }
 
     protected NuxeoLoginContext loginSystemOrUser(String username) throws LoginException {

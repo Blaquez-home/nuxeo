@@ -1,5 +1,5 @@
 /*
- * (C) Copyright 2014-2018 Nuxeo (http://nuxeo.com/) and others.
+ * (C) Copyright 2014-2021 Nuxeo (http://nuxeo.com/) and others.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -106,8 +106,8 @@ import java.util.stream.Stream;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.mutable.Mutable;
 import org.apache.commons.lang3.mutable.MutableObject;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.nuxeo.ecm.core.api.Blob;
 import org.nuxeo.ecm.core.api.CoreSession;
 import org.nuxeo.ecm.core.api.DocumentExistsException;
@@ -172,7 +172,7 @@ import io.dropwizard.metrics5.Timer;
  */
 public class DBSSession extends BaseSession {
 
-    private static final Log log = LogFactory.getLog(DBSSession.class);
+    private static final Logger log = LogManager.getLogger(DBSSession.class);
 
     protected static final Set<String> KEYS_RETENTION_HOLD_AND_PROXIES = new HashSet<>(Arrays.asList(KEY_RETAIN_UNTIL,
             KEY_HAS_LEGAL_HOLD, KEY_IS_RETENTION_ACTIVE, KEY_IS_PROXY, KEY_PROXY_TARGET_ID, KEY_PROXY_IDS));
@@ -776,7 +776,7 @@ public class DBSSession extends BaseSession {
     protected String copy(String sourceId, String parentId, List<String> ancestorIds, String name) {
         DBSDocumentState copy = transaction.copy(sourceId);
         copy.put(KEY_PARENT_ID, parentId);
-        copy.put(KEY_ANCESTOR_IDS, ancestorIds.toArray(new Object[ancestorIds.size()]));
+        copy.put(KEY_ANCESTOR_IDS, ancestorIds.toArray(Object[]::new));
         if (name != null) {
             copy.put(KEY_NAME, name);
         }
@@ -871,7 +871,7 @@ public class DBSSession extends BaseSession {
             }
         }
         ancestorIdsList.add(parentId);
-        Object[] ancestorIds = ancestorIdsList.toArray(new Object[ancestorIdsList.size()]);
+        Object[] ancestorIds = ancestorIdsList.toArray(Object[]::new);
 
         if (ancestorIdsList.contains(sourceId)) {
             throw new DocumentExistsException("Cannot move a node under itself: " + parentId + " is under " + sourceId);
@@ -950,9 +950,7 @@ public class DBSSession extends BaseSession {
 
         // if a subdocument is under retention / hold, removal fails
         if (!undeletableIds.isEmpty()) {
-            // in tests we may want to delete everything
-            boolean allowDeleteUndeletable = Framework.isBooleanPropertyTrue(PROP_ALLOW_DELETE_UNDELETABLE_DOCUMENTS);
-            if (!allowDeleteUndeletable) {
+            if (!BaseSession.canDeleteUndeletable(principal)) {
                 if (undeletableIds.contains(rootId)) {
                     throw new DocumentExistsException("Cannot remove " + rootId + ", it is under retention / hold");
                 } else {
@@ -979,9 +977,8 @@ public class DBSSession extends BaseSession {
         // Check that the ids to remove is not only the root id
         if (removedIds.size() > 1) {
             String nxql = String.format("SELECT * FROM Document, Relation WHERE ecm:ancestorId = '%s'", rootId);
-            BulkCommand command = new BulkCommand.Builder(ACTION_NAME, nxql, principal.getName())
-                                                 .repository(getRepositoryName())
-                                                 .build();
+            BulkCommand command = new BulkCommand.Builder(ACTION_NAME, nxql, principal.getName()).repository(
+                    getRepositoryName()).build();
             Framework.getService(BulkService.class).submit(command);
         }
 
@@ -1086,7 +1083,7 @@ public class DBSSession extends BaseSession {
                 keepIds.add(pid);
             }
         }
-        Object[] newProxyIds = keepIds.isEmpty() ? null : keepIds.toArray(new Object[keepIds.size()]);
+        Object[] newProxyIds = keepIds.isEmpty() ? null : keepIds.toArray(Object[]::new);
         docState.put(KEY_PROXY_IDS, newProxyIds);
     }
 
@@ -1323,7 +1320,7 @@ public class DBSSession extends BaseSession {
     @Override
     public ACP getACP(Document doc) {
         State state = transaction.getStateForRead(doc.getUUID());
-        return memToAcp(state.get(KEY_ACP));
+        return memToAcp(doc.getUUID(), state.get(KEY_ACP));
     }
 
     @Override
@@ -1393,7 +1390,7 @@ public class DBSSession extends BaseSession {
         return (Serializable) aclList;
     }
 
-    protected static ACP memToAcp(Serializable acpSer) {
+    protected static ACP memToAcp(String docId, Serializable acpSer) {
         if (acpSer == null) {
             return null;
         }
@@ -1411,9 +1408,15 @@ public class DBSSession extends BaseSession {
             ACL acl = new ACLImpl(name);
             for (Serializable aceSer : aceList) {
                 State aceMap = (State) aceSer;
+                var granted = (Boolean) aceMap.get(KEY_ACE_GRANT);
+                if (granted == null) {
+                    log.warn(
+                            "An ACE with grant=null has been detected on document: {}, ace: {}, defaulting to grant=false",
+                            docId, aceMap);
+                    granted = Boolean.FALSE;
+                }
                 String username = (String) aceMap.get(KEY_ACE_USER);
                 String permission = (String) aceMap.get(KEY_ACE_PERMISSION);
-                boolean granted = (boolean) aceMap.get(KEY_ACE_GRANT);
                 String creator = (String) aceMap.get(KEY_ACE_CREATOR);
                 Calendar begin = (Calendar) aceMap.get(KEY_ACE_BEGIN);
                 Calendar end = (Calendar) aceMap.get(KEY_ACE_END);
@@ -1467,16 +1470,17 @@ public class DBSSession extends BaseSession {
         transaction.save();
 
         DBSDocumentState docState = transaction.getStateForUpdate(id);
-
-        Calendar retainUntil = (Calendar) docState.get(KEY_RETAIN_UNTIL);
-        if (retainUntil != null && Calendar.getInstance().before(retainUntil)) {
-            throw new DocumentExistsException("Cannot remove " + id + ", it is under retention / hold");
-        }
-        if (TRUE.equals(docState.get(KEY_HAS_LEGAL_HOLD))) {
-            throw new DocumentExistsException("Cannot remove " + id + ", it is under retention / hold");
-        }
-        if (TRUE.equals(docState.get(KEY_IS_RETENTION_ACTIVE))) {
-            throw new DocumentExistsException("Cannot remove " + id + ", it is under active retention");
+        if (!BaseSession.canDeleteUndeletable(NuxeoPrincipal.getCurrent())) {
+            Calendar retainUntil = (Calendar) docState.get(KEY_RETAIN_UNTIL);
+            if (retainUntil != null && Calendar.getInstance().before(retainUntil)) {
+                throw new DocumentExistsException("Cannot remove " + id + ", it is under retention / hold");
+            }
+            if (TRUE.equals(docState.get(KEY_HAS_LEGAL_HOLD))) {
+                throw new DocumentExistsException("Cannot remove " + id + ", it is under retention / hold");
+            }
+            if (TRUE.equals(docState.get(KEY_IS_RETENTION_ACTIVE))) {
+                throw new DocumentExistsException("Cannot remove " + id + ", it is under active retention");
+            }
         }
 
         // notify blob manager before removal
@@ -1537,7 +1541,7 @@ public class DBSSession extends BaseSession {
         if ("NXTAG".equals(queryType)) {
             // for now don't try to implement tags
             // and return an empty list
-            return new PartialList<>(Collections.<Map<String, Serializable>> emptyList(), 0);
+            return new PartialList<>(Collections.emptyList(), 0);
         }
         if (!NXQL.NXQL.equals(queryType)) {
             throw new NuxeoException("No QueryMaker accepts query type: " + queryType);

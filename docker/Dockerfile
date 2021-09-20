@@ -40,7 +40,7 @@ ARG BUILD_TAG
 ARG SCM_REF
 ARG VERSION
 
-ARG LIBREOFFICE_VERSION=7.1.1
+ARG LIBREOFFICE_VERSION=7.1.5
 
 LABEL org.nuxeo.build-tag=$BUILD_TAG
 LABEL org.nuxeo.scm-ref=$SCM_REF
@@ -82,6 +82,8 @@ RUN yum -y update \
     ufraw \
     unzip \
     wget \
+    # Add CJK fonts
+    google-noto-cjk-fonts \
   && yum clean all
 
 # Remove setuid/setgid binaries from images for security
@@ -144,6 +146,9 @@ VOLUME /var/log/nuxeo
 VOLUME /tmp
 
 ENV PATH $NUXEO_HOME/bin:$PATH
+
+# Set an UTF-8 LANG
+ENV LANG en_US.utf8
 
 EXPOSE 8080
 ENTRYPOINT ["/docker-entrypoint.sh"]

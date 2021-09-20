@@ -57,12 +57,12 @@ public class AzureBinaryManager extends AbstractCloudBinaryManager {
 
     private static final Log log = LogFactory.getLog(AzureBinaryManager.class);
 
-    private final static String STORAGE_CONNECTION_STRING = "DefaultEndpointsProtocol=%s;" + "AccountName=%s;"
+    private static final String STORAGE_CONNECTION_STRING = "DefaultEndpointsProtocol=%s;" + "AccountName=%s;"
             + "AccountKey=%s";
 
     public static final String ENDPOINT_PROTOCOL_PROPERTY = "endpointProtocol";
 
-    public final static String SYSTEM_PROPERTY_PREFIX = "nuxeo.storage.azure";
+    public static final String SYSTEM_PROPERTY_PREFIX = "nuxeo.storage.azure";
 
     public static final String ACCOUNT_NAME_PROPERTY = "account.name";
 
@@ -150,7 +150,7 @@ public class AzureBinaryManager extends AbstractCloudBinaryManager {
 
             CloudBlockBlob signedBlob = new CloudBlockBlob(blockBlobReference.getUri(),
                     new StorageCredentialsSharedAccessSignature(sas));
-            return signedBlob.getQualifiedUri();
+            return signedBlob.getSnapshotQualifiedUri();
         } catch (URISyntaxException | InvalidKeyException | StorageException e) {
             throw new IOException(e);
         }
@@ -174,4 +174,30 @@ public class AzureBinaryManager extends AbstractCloudBinaryManager {
     public void removeBinaries(Collection<String> digests) {
         digests.forEach(this::removeBinary);
     }
+
+    /**
+     * @since 11.5
+     * @return the length of the blob with the given {@code digest}, or -1 if missing
+     */
+    protected long lengthOfBlob(String digest) throws URISyntaxException, StorageException {
+        try {
+            CloudBlockBlob blob = container.getBlockBlobReference(prefix + digest);
+            blob.downloadAttributes();
+            return blob.getProperties().getLength();
+        } catch (StorageException e) {
+            if (isMissingKey(e)) {
+                return -1;
+            }
+            throw e;
+        }
+    }
+
+    /**
+     * @since 11.5
+     */
+    protected static boolean isMissingKey(StorageException e) {
+        return (e.getHttpStatusCode() == 404) || "BlobNotFound".equals(e.getErrorCode())
+                || "The specified blob does not exist.".equals(e.getMessage());
+    }
+
 }

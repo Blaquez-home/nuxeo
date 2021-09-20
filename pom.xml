@@ -69,7 +69,7 @@
     <servlet-api.version>4.0.1</servlet-api.version>
     <jaxb-api.version>2.3.3</jaxb-api.version>
     <jaxb.version>2.3.3</jaxb.version>
-    <tomcat.version>9.0.48</tomcat.version>
+    <tomcat.version>9.0.52</tomcat.version>
     <lucene.version>8.6.2</lucene.version>
     <elasticsearch.version>7.9.2</elasticsearch.version> <!-- when changing this make sure JNA version is in sync -->
     <jna.version>4.5.2</jna.version>
@@ -1484,6 +1484,18 @@
       <dependency>
         <groupId>org.nuxeo.ecm.platform</groupId>
         <artifactId>nuxeo-platform-video</artifactId>
+        <version>${nuxeo.platform.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.nuxeo.ecm.platform</groupId>
+        <artifactId>nuxeo-platform-video</artifactId>
+        <version>${nuxeo.platform.version}</version>
+        <type>test-jar</type>
+        <scope>test</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.nuxeo.ecm.platform</groupId>
+        <artifactId>nuxeo-platform-video-rest</artifactId>
         <version>${nuxeo.platform.version}</version>
       </dependency>
 
@@ -4282,7 +4294,7 @@
       <dependency>
         <groupId>com.microsoft.azure</groupId>
         <artifactId>azure-storage</artifactId>
-        <version>8.6.5</version>
+        <version>8.6.6</version>
       </dependency>
 
       <dependency>

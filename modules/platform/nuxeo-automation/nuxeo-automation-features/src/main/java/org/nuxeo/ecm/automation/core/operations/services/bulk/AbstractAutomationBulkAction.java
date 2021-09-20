@@ -18,6 +18,7 @@
  */
 package org.nuxeo.ecm.automation.core.operations.services.bulk;
 
+import static java.util.stream.Collectors.joining;
 import static org.nuxeo.ecm.core.bulk.BulkServiceImpl.STATUS_STREAM;
 import static org.nuxeo.lib.stream.computation.AbstractComputation.INPUT_1;
 import static org.nuxeo.lib.stream.computation.AbstractComputation.OUTPUT_1;
@@ -28,6 +29,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import org.apache.commons.lang3.BooleanUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -50,15 +52,17 @@ import org.nuxeo.runtime.stream.StreamProcessorTopology;
  *
  * @since 11.5
  */
-abstract public class AbstractAutomationBulkAction implements StreamProcessorTopology {
+public abstract class AbstractAutomationBulkAction implements StreamProcessorTopology {
 
     private static final Logger log = LogManager.getLogger(AbstractAutomationBulkAction.class);
+
+    public static final String FAIL_ON_ERROR_OPTION = "failOnError";
 
     public static final String OPERATION_ID = "operationId";
 
     public static final String OPERATION_PARAMETERS = "parameters";
 
-    abstract protected String getActionName();
+    protected abstract String getActionName();
 
     protected String getActionFullName() {
         return "bulk/" + getActionName();
@@ -66,16 +70,20 @@ abstract public class AbstractAutomationBulkAction implements StreamProcessorTop
 
     @Override
     public Topology getTopology(Map<String, String> options) {
+        boolean failOnError = BooleanUtils.toBoolean(options.get(FAIL_ON_ERROR_OPTION));
         return Topology.builder()
-                .addComputation(() -> new AutomationComputation(getActionFullName()), Arrays.asList(INPUT_1 + ":" + getActionFullName(), //
-                        OUTPUT_1 + ":" + STATUS_STREAM))
-                .build();
+                       .addComputation(() -> new AutomationComputation(getActionFullName(), failOnError),
+                               Arrays.asList(INPUT_1 + ":" + getActionFullName(), //
+                                       OUTPUT_1 + ":" + STATUS_STREAM))
+                       .build();
     }
 
     public static class AutomationComputation extends AbstractBulkComputation {
         public static final String DOC_INPUT_TYPE = "document";
 
         public static final String DOCS_INPUT_TYPE = "documents";
+
+        protected final boolean failOnError;
 
         protected AutomationService service;
 
@@ -85,8 +93,9 @@ abstract public class AbstractAutomationBulkAction implements StreamProcessorTop
 
         protected Map<String, ?> params;
 
-        public AutomationComputation(String name) {
+        public AutomationComputation(String name, boolean failOnError) {
             super(name);
+            this.failOnError = failOnError;
         }
 
         @Override
@@ -116,7 +125,7 @@ abstract public class AbstractAutomationBulkAction implements StreamProcessorTop
                 ctx.setInput(documents);
                 service.run(ctx, operationId, params);
             } catch (OperationException e) {
-                throw new NuxeoException("Operation fails on documents: " + documents, e);
+                handleError(documents, e);
             }
         }
 
@@ -125,15 +134,27 @@ abstract public class AbstractAutomationBulkAction implements StreamProcessorTop
                 try (OperationContext ctx = new OperationContext(session)) {
                     ctx.setInput(doc);
                     service.run(ctx, operationId, params);
-                } catch (OperationException e) {
-                    throw new NuxeoException("Operation fails on doc: " + doc.getId(), e);
+                } catch (OperationException | NuxeoException e) {
+                    handleError(List.of(doc), e);
                 }
+            }
+        }
+
+        protected void handleError(List<DocumentModel> documents, Exception e) {
+            String documentIds = documents.stream().map(DocumentModel::getId).collect(joining(",", "[", "]"));
+            String message = String.format("Bulk Action Operation with commandId: %s fails on documents: %s",
+                    command.getId(), documentIds);
+            if (failOnError) {
+                throw new NuxeoException(message, e);
+            } else {
+                delta.inError(documents.size(), message);
+                log.warn(message, e);
             }
         }
 
         protected void checkOperation(String operationId) {
             if (StringUtils.isBlank(operationId)) {
-                log.warn("No operationId provided skipping command: " + getCurrentCommand().getId());
+                log.warn("No operationId provided skipping command: {}", getCurrentCommand().getId());
                 return;
             }
             try {
@@ -144,25 +165,25 @@ abstract public class AbstractAutomationBulkAction implements StreamProcessorTop
                 } else if (DOCS_INPUT_TYPE.equals(inputType)) {
                     inputType = DOCS_INPUT_TYPE;
                 } else {
-                    log.warn(String.format("Unsupported operation input type %s for command: %s", inputType,
-                            getCurrentCommand().getId()));
+                    log.warn("Unsupported operation input type: {} for command: {}", inputType,
+                            getCurrentCommand().getId());
                     return;
                 }
             } catch (OperationNotFoundException e) {
-                log.warn(String.format("Operation '%s' not found, skipping command: %s", operationId,
-                        getCurrentCommand().getId()));
+                log.warn("Operation: '{}' not found, skipping command: {}", operationId, getCurrentCommand().getId());
                 return;
             }
             this.operationId = operationId;
         }
 
+        @SuppressWarnings("unchecked")
         protected void checkParams(Serializable serializable) {
             if (serializable == null) {
                 params = null;
             } else if (serializable instanceof HashMap) {
                 params = (Map<String, ?>) serializable;
             } else {
-                log.warn("Unknown operation parameters type: " + serializable.getClass() + " for command: " + command);
+                log.warn("Unknown operation parameters type: {} for command: {}", serializable.getClass(), command);
                 operationId = null;
             }
         }
