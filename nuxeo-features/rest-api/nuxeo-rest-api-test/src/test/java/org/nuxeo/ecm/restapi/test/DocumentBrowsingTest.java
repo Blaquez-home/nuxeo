@@ -30,6 +30,7 @@ import static org.nuxeo.ecm.core.io.registry.MarshallingConstants.HEADER_PREFIX;
 import java.io.IOException;
 import java.io.Serializable;
 import java.util.Arrays;
+import java.util.Calendar;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -53,6 +54,7 @@ import org.nuxeo.ecm.core.api.event.DocumentEventTypes;
 import org.nuxeo.ecm.core.api.impl.blob.StringBlob;
 import org.nuxeo.ecm.core.event.EventContext;
 import org.nuxeo.ecm.core.event.test.CapturingEventListener;
+import org.nuxeo.ecm.core.io.marshallers.json.JsonAssert;
 import org.nuxeo.ecm.core.io.marshallers.json.document.ACPJsonWriter;
 import org.nuxeo.ecm.core.io.marshallers.json.enrichers.BasePermissionsJsonEnricher;
 import org.nuxeo.ecm.core.io.registry.MarshallingConstants;
@@ -617,6 +619,20 @@ public class DocumentBrowsingTest extends BaseTest {
         }
     }
 
+    // NXP-30680
+    @Test
+    @Deploy("org.nuxeo.ecm.core.test.tests:OSGI-INF/test-repo-core-types-contrib.xml")
+    public void iCantCreateADocumentWithAWrongPropertyType() {
+        DocumentModel folder = RestServerInit.getFolder(0, session);
+
+        String data = "{\"entity-type\": \"document\",\"type\": \"MyDocType\",\"name\":\"newName\",\"properties\": {\"my:integer\":\"Some string\"}}";
+
+        try (CloseableClientResponse response = getResponse(RequestType.POST, "path" + folder.getPathAsString(),
+                data)) {
+            assertEquals(Response.Status.BAD_REQUEST.getStatusCode(), response.getStatus());
+        }
+    }
+
     // NXP-30052
     @Test
     public void iCantCreateADocumentWithNonExistingType() throws IOException {
@@ -893,6 +909,32 @@ public class DocumentBrowsingTest extends BaseTest {
     }
 
     @Test
+    public void iCanGetThePermissionsOnADocumentUnderRetention() throws Exception {
+        // Given an existing doc under retention as an admin
+        DocumentModel file = RestServerInit.getFile(0, session);
+        Calendar retainUntil = Calendar.getInstance();
+        retainUntil.add(Calendar.DAY_OF_MONTH, 5);
+        session.makeRecord(file.getRef());
+        session.setRetainUntil(file.getRef(), retainUntil, "any comment");
+        TransactionHelper.commitOrRollbackTransaction();
+        TransactionHelper.startTransaction();
+        Map<String, String> headers = new HashMap<>();
+        headers.put(MarshallingConstants.EMBED_ENRICHERS + ".document", BasePermissionsJsonEnricher.NAME);
+        // When i do a GET Request on the doc
+        try (CloseableClientResponse response = getResponse(RequestType.GET,
+                "repo/" + file.getRepositoryName() + "/path" + file.getPathAsString(), headers)) {
+
+            // Then i get a list of permissions as an admin
+            assertEquals(Response.Status.OK.getStatusCode(), response.getStatus());
+            JsonNode node = mapper.readTree(response.getEntityInputStream());
+            JsonNode permissions = node.get(RestConstants.CONTRIBUTOR_CTX_PARAMETERS).get("permissions");
+            assertNotNull(permissions);
+            assertTrue(permissions.isArray());
+            assertTrue(permissions.size() > 0);
+        }
+    }
+
+    @Test
     public void iCanGetThePermissionsOnADocumentThroughContributor() throws Exception {
         // Given an existing document
         DocumentModel note = RestServerInit.getNote(0, session);
@@ -983,6 +1025,34 @@ public class DocumentBrowsingTest extends BaseTest {
             assertTrue(contributors.contains("bob"));
             assertTrue(contributors.contains("Administrator"));
             assertEquals(2, contributors.size());
+        }
+    }
+
+    // NXP-30846
+    @Deploy("org.nuxeo.ecm.platform.restapi.test.test:delivery-doctype.xml")
+    @Test
+    public void itCanAccessDetachedDocumentACP() throws IOException {
+        DocumentModel doc = session.createDocumentModel("/", "deliv", "Delivery");
+        DocumentModel subDoc = session.createDocumentModel("/", "deliv2", "Delivery");
+        subDoc = session.createDocument(subDoc);
+        doc.setPropertyValue("delivery:docu", subDoc.getId());
+        doc = session.createDocument(doc);
+
+        TransactionHelper.commitOrRollbackTransaction();
+        TransactionHelper.startTransaction();
+
+        Map<String, String> headers = new HashMap<>();
+        headers.put(MarshallingConstants.EMBED_ENRICHERS + ".document", ACLJsonEnricher.NAME);
+        headers.put("properties", "*");
+        headers.put("fetch.document", "delivery:docu");
+        headers.put("depth", "max");
+        try (CloseableClientResponse response = getResponse(RequestType.GET, "id/" + doc.getId(), headers)) {
+            assertEquals(Response.Status.OK.getStatusCode(), response.getStatus());
+            JsonAssert.on(response.getEntity(String.class))
+                      .has("properties")
+                      .has("delivery:docu")
+                      .has("contextParameters")
+                      .has("acls");
         }
     }
 

@@ -77,6 +77,7 @@ public class PropertyTrashService extends AbstractTrashService {
                 // handle placeless document
                 session.removeDocument(doc.getRef());
             } else {
+                checkCanTrash(doc);
                 DocumentModel docForEvent = doc;
                 if (!Boolean.parseBoolean(String.valueOf(doc.getContextData(DISABLE_TRASH_RENAMING)))) {
                     String newName = mangleName(doc);
@@ -141,7 +142,7 @@ public class PropertyTrashService extends AbstractTrashService {
         CoreSession session = model.getCoreSession();
         BulkService service = Framework.getService(BulkService.class);
         String nxql = String.format("SELECT * from Document where ecm:ancestorId='%s'", model.getId());
-        service.submit(new BulkCommand.Builder(ACTION_NAME, nxql).repository(session.getRepositoryName())
+        service.submitTransactional(new BulkCommand.Builder(ACTION_NAME, nxql).repository(session.getRepositoryName())
                                                                  .user(session.getPrincipal().getName())
                                                                  .param(PARAM_NAME, value)
                                                                  .build());

@@ -19,8 +19,10 @@
 package org.nuxeo.ecm.core.bulk;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.nuxeo.ecm.core.bulk.BulkServiceImpl.BULK_LOG_MANAGER_NAME;
 import static org.nuxeo.ecm.core.bulk.action.SetPropertiesAction.ACTION_NAME;
@@ -115,6 +117,8 @@ public class TestSetPropertiesAction {
         assertNotNull(status);
         assertEquals(COMPLETED, status.getState());
         assertEquals(DOC_BY_LEVEL, status.getProcessed());
+        assertFalse(status.hasError());
+        assertEquals(0, status.getErrorCount());
 
         List<BulkStatus> statuses = service.getStatuses(username);
         assertEquals(1, statuses.size() - oldSize);
@@ -167,6 +171,8 @@ public class TestSetPropertiesAction {
         assertNotNull(status);
         assertEquals(COMPLETED, status.getState());
         assertEquals(3, status.getProcessed());
+        assertTrue(status.hasError());
+        assertEquals(2, status.getErrorCount());
 
         List<BulkStatus> statuses = service.getStatuses(session.getPrincipal().getName());
         assertEquals(1, statuses.size() - oldSize);
@@ -176,6 +182,35 @@ public class TestSetPropertiesAction {
         txFeature.nextTransaction();
         doc.refresh();
         assertEquals("test foo", doc.getPropertyValue("cpx:complex/foo"));
+    }
+
+    @Test
+    public void testSetPropertiesWithConstraintError() throws Exception {
+        DocumentModel doc = session.getDocument(new PathRef("/default-domain/workspaces/test/testdoc0"));
+        session.save();
+        txFeature.nextTransaction();
+
+        String nxql = String.format("SELECT * FROM Document WHERE ecm:uuid in ('%s')", doc.getId());
+
+        String commandId = service.submit(
+                new Builder(ACTION_NAME, nxql).repository(session.getRepositoryName())
+                                              .user(session.getPrincipal().getName())
+                                              .param("cpx:complex/foo",
+                                                      "A value so long that it exceeds the constraint limit")
+                                              .build());
+        assertTrue("Bulk action didn't finish", service.await(Duration.ofSeconds(60)));
+
+        BulkStatus status = service.getStatus(commandId);
+        assertNotNull(status);
+        assertEquals(COMPLETED, status.getState());
+        assertEquals(1, status.getProcessed());
+        assertTrue(status.hasError());
+        assertEquals(1, status.getErrorCount());
+
+        // because of the constraint violation the property is not set
+        txFeature.nextTransaction();
+        doc.refresh();
+        assertNull(doc.getPropertyValue("cpx:complex/foo"));
     }
 
     @Test

@@ -42,7 +42,7 @@ class DocumentEditor extends Select2Editor {
   }
 
   getEntryId(item) {
-    return item.uid;
+    return (item && (item.uid || item.id));
   }
 
   // create documents again on save

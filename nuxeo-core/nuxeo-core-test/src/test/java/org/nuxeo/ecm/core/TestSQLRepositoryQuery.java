@@ -2859,6 +2859,22 @@ public class TestSQLRepositoryQuery {
     }
 
     @Test
+    public void testQueryComplexCorrelationForSchemaWithNoPrefix() {
+        DocumentModel doc = session.createDocumentModel("/", "testfile", "File");
+        Blob blob1 = Blobs.createBlob("foo", "text/plain", null, "foo.txt");
+        Blob blob2 = Blobs.createBlob("bar", "text/plain", null, "bar.txt");
+
+        doc.setPropertyValue("files:files", (Serializable) Arrays.asList(Collections.singletonMap("file", blob1),
+                Collections.singletonMap("file", blob2)));
+        doc = session.createDocument(doc);
+        session.save();
+
+        String clause = "files:files/*1/file/name = 'foo.txt' AND files:files/*1/file/length = 3";
+        DocumentModelList res = session.query("SELECT * FROM File WHERE ecm:isProxy = 0 AND " + clause);
+        assertEquals(1, res.size());
+    }
+
+    @Test
     public void testQueryComplexPrefix() throws Exception {
         DocumentModel doc = makeComplexDoc();
         String docId = doc.getId();
@@ -4029,4 +4045,24 @@ public class TestSQLRepositoryQuery {
         }
     }
 
+    // NXP-30832
+    @Test
+    public void testInvalidQuery() {
+        try {
+            session.query("SELECT * FROM Document WHERE uid/* IS NULL");
+            fail("Query should have failed");
+        } catch (QueryParseException e) {
+            assertEquals("Failed to execute query: SELECT * FROM Document WHERE uid/* IS NULL, No such property: uid/*",
+                    e.getMessage());
+        }
+
+        try {
+            session.query("SELECT * FROM Document WHERE uid/name IS NULL");
+            fail("Query should have failed");
+        } catch (QueryParseException e) {
+            assertEquals(
+                    "Failed to execute query: SELECT * FROM Document WHERE uid/name IS NULL, No such property: uid/name",
+                    e.getMessage());
+        }
+    }
 }

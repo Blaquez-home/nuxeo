@@ -286,11 +286,13 @@ public abstract class TestStreamProcessor {
         testComplexTopo(1003, 4, 8);
     }
 
+    @Ignore("NXP-30564")
     @Test
     public void testComplexTopoManyRecordsOnePartition() throws Exception {
         testComplexTopo(101, 8, 1);
     }
 
+    @Ignore("NXP-30564")
     @Test
     public void testComplexTopoManyRecordsOneThreadManyPartitions() throws Exception {
         testComplexTopo(100, 6, 8);

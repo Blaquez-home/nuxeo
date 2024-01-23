@@ -4,6 +4,17 @@
   <require>org.nuxeo.runtime.stream.service</require>
 
   <!-- ======================================================================================= -->
+  <!-- Ensure backward/forward compatibility by registering schema evolution -->
+  <extension point="schema" target="org.nuxeo.runtime.avro">
+    <schema name="Record-10.10-HF01" file="avro/Record-0x77EACC1CE6E293FB.avsc " />
+    <schema name="BulkCommand-10.10-HF38" file="avro/BulkCommand-0xC6615A90942CA30B.avsc" />
+    <schema name="BulkStatus-10.10-HF38" file="avro/BulkStatus-0xD8A0F490388FE2A7.avsc" />
+    <schema name="BulkStatus-10.10-HF54" file="avro/BulkStatus-0x26CF42CFBF261FBD.avsc" />
+    <schema name="DataBucket-10.10-HF01" file="avro/DataBucket-0xB62494C74E419198.avsc" />
+    <schema name="BulkBucket-10.10-HF01" file="avro/BulkBucket-0xCC59A5FF2725F7AF.avsc" />
+  </extension>
+
+  <!-- ======================================================================================= -->
   <!-- Bulk Service configuration -->
 
   <!-- Initialize bulk service streams before action processors -->
@@ -54,25 +65,29 @@
   <extension target="org.nuxeo.runtime.stream.service" point="streamProcessor">
     <!-- SetProperty processor -->
     <streamProcessor name="setProperties" class="org.nuxeo.ecm.core.bulk.action.SetPropertiesAction" logConfig="bulk"
-      defaultConcurrency="2" defaultPartitions="2">
+      defaultConcurrency="${nuxeo.bulk.action.setProperties.defaultConcurrency:=2}"
+      defaultPartitions="${nuxeo.bulk.action.setProperties.defaultPartitions:=2}">
       <policy name="default" maxRetries="3" delay="500ms" maxDelay="10s" continueOnFailure="false" />
     </streamProcessor>
 
     <!-- SetSystemProperty processor -->
     <streamProcessor name="setSystemProperties" class="org.nuxeo.ecm.core.bulk.action.SetSystemPropertiesAction"
-      logConfig="bulk" defaultConcurrency="2" defaultPartitions="2">
+      logConfig="bulk" defaultConcurrency="${nuxeo.bulk.action.setSystemProperties.defaultConcurrency:=2}"
+      defaultPartitions="${nuxeo.bulk.action.setSystemProperties.defaultPartitions:=2}">
       <policy name="default" maxRetries="3" delay="500ms" maxDelay="10s" continueOnFailure="false" />
     </streamProcessor>
 
     <!-- RemoveProxy processor -->
     <streamProcessor name="removeProxy" class="org.nuxeo.ecm.core.bulk.action.RemoveProxyAction" logConfig="bulk"
-      defaultConcurrency="2" defaultPartitions="2">
+      defaultConcurrency="${nuxeo.bulk.action.removeProxy.defaultConcurrency:=2}"
+      defaultPartitions="${nuxeo.bulk.action.removeProxy.defaultPartitions:=2}">
       <policy name="default" maxRetries="3" delay="500ms" maxDelay="10s" continueOnFailure="false" />
     </streamProcessor>
 
     <!-- Trash processor -->
     <streamProcessor name="trash" class="org.nuxeo.ecm.core.bulk.action.TrashAction" logConfig="bulk"
-      defaultConcurrency="1" defaultPartitions="1">
+      defaultConcurrency="${nuxeo.bulk.action.trash.defaultConcurrency:=1}"
+      defaultPartitions="${nuxeo.bulk.action.trash.defaultPartitions:=1}">
       <policy name="default" maxRetries="3" delay="500ms" maxDelay="10s" continueOnFailure="false" />
     </streamProcessor>
 

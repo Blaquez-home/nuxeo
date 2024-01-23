@@ -40,6 +40,7 @@ import org.nuxeo.ecm.core.api.CoreSession;
 import org.nuxeo.ecm.core.api.DocumentModel;
 import org.nuxeo.ecm.core.api.DocumentModelList;
 import org.nuxeo.ecm.core.api.NuxeoException;
+import org.nuxeo.ecm.core.api.model.PropertyConversionException;
 import org.nuxeo.ecm.core.bulk.BulkCodecs;
 import org.nuxeo.ecm.core.bulk.action.computation.AbstractBulkComputation;
 import org.nuxeo.ecm.core.bulk.message.BulkStatus;
@@ -59,7 +60,6 @@ import org.nuxeo.runtime.api.Framework;
 public class IndexRequestComputation extends AbstractBulkComputation {
     private static final Log log = LogFactory.getLog(IndexRequestComputation.class);
 
-    // we want to avoid record bigger than 1MB because they requires specific configuration and impact performance
     protected static final long MAX_RECORD_SIZE = 900_000;
 
     protected static final String INDEX_OPTION = "indexName";
@@ -94,6 +94,8 @@ public class IndexRequestComputation extends AbstractBulkComputation {
                                                                          .version(now));
             } catch (IOException e) {
                 throw new NuxeoException("Cannot build source for document: " + doc.getId(), e);
+            } catch (PropertyConversionException e) {
+                log.error("Skipping indexing of corrupted doc: " + doc.getId(), e);
             }
         }
     }
@@ -106,8 +108,9 @@ public class IndexRequestComputation extends AbstractBulkComputation {
                 bulkRequest = new BulkRequest();
             }
             if (indexRequest.source().length() > MAX_RECORD_SIZE) {
-                log.warn(String.format("Indexing request for doc: %s, is too large: %d, max record size: %d",
-                        indexRequest.id(), indexRequest.source().length(), MAX_RECORD_SIZE));
+                // Record overflow is handled by stream filter, warn because it is a performance concern
+                log.warn(String.format("Indexing request for doc: %s, is very large: %d", indexRequest.id(),
+                        indexRequest.source().length()));
             }
         }
         bulkRequest.add(indexRequest);
@@ -128,6 +131,7 @@ public class IndexRequestComputation extends AbstractBulkComputation {
             count += request.numberOfActions();
         }
         if (count < bucketSize) {
+            // documents might have been deleted otherwise there are warning logs (corrupted docs)
             log.warn(String.format("Command: %s offset: %s created %d documents out of %d, %d not accessible",
                     commandId, context.getLastOffset(), count, bucketSize, bucketSize - count));
             DataBucket dataBucket = new DataBucket(commandId, bucketSize - count, toBytes(new BulkRequest()));

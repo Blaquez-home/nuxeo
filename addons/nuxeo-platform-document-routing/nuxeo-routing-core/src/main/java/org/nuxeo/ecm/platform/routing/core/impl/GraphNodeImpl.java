@@ -352,8 +352,10 @@ public class GraphNodeImpl extends DocumentRouteElementImpl implements GraphNode
                     if (!equality(value, oldValue)) {
                         if (!allowGlobalVariablesAssignement
                                 && (transientSchema == null || !transientSchema.hasField(key))) {
-                            throw new DocumentRouteException(String.format(
-                                    "You don't have the permission to set the workflow variable %s", key));
+                            log.warn(String.format(
+                                    "The workflow variable %s cannot be set within graph node %s completion", key,
+                                    getId()));
+                            continue;
                         }
                         changedGraphVariables.put(key, value);
                     }
@@ -836,7 +838,10 @@ public class GraphNodeImpl extends DocumentRouteElementImpl implements GraphNode
         if (!StringUtils.isEmpty(subRouteInstanceId)) {
             DocumentModel subRouteDoc = getSession().getDocument(new IdRef(subRouteInstanceId));
             DocumentRoute subRoute = subRouteDoc.getAdapter(DocumentRoute.class);
-            subRoute.cancel(getSession());
+            if (!subRoute.isCanceled()) {
+                // Sub route may have been already canceled
+                subRoute.cancel(getSession());
+            }
         }
     }
 

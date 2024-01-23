@@ -23,7 +23,6 @@ import static javax.servlet.http.HttpServletResponse.SC_BAD_REQUEST;
 import java.io.IOException;
 import java.io.Serializable;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -127,7 +126,8 @@ public class SearchObject extends QueryExecutor {
         MultivaluedMap<String, String> queryParams = uriInfo.getQueryParameters();
         String query = getQueryString(null, queryParams);
         String scrollName = queryParams.getFirst(SCROLL_PARAM);
-        return newObject("bulkAction", query, scrollName);
+        String queryLimit = queryParams.getFirst(QUERY_LIMIT_PARAM);
+        return newObject("bulkAction", query, scrollName, queryLimit);
     }
 
     @GET
@@ -150,9 +150,18 @@ public class SearchObject extends QueryExecutor {
     public Object doBulkActionByPageProvider(@PathParam("pageProviderName") String pageProviderName,
             @Context UriInfo uriInfo) {
         MultivaluedMap<String, String> queryParams = uriInfo.getQueryParameters();
-        String query = getQueryString(pageProviderName, queryParams);
-        String scrollName = queryParams.getFirst(SCROLL_PARAM);
-        return newObject("bulkAction", query, scrollName);
+        PageProvider<?> pageProvider = getPageProvider(pageProviderName, queryParams);
+        String query = getQueryString(pageProvider);
+        String scrollName;
+        String scrollParam = queryParams.getFirst(SCROLL_PARAM);
+        if (StringUtils.isEmpty(scrollParam)) {
+            // no scroll parameter, fall back on page provider type
+            scrollName = Framework.getService(PageProviderService.class).getPageProviderType(pageProvider).toString();
+        } else {
+            scrollName = scrollParam;
+        }
+        String queryLimit = queryParams.getFirst(QUERY_LIMIT_PARAM);
+        return newObject("bulkAction", query, scrollName, queryLimit);
     }
 
     @GET
@@ -313,8 +322,8 @@ public class SearchObject extends QueryExecutor {
         DocumentModel searchDocumentModel = PageProviderHelper.getSearchDocumentModel(ctx.getCoreSession(), null,
                 namedParametersProps);
 
-        return queryByLang(query, pageSize, currentPageIndex, currentPageOffset, maxResults, sortInfo,
-                props, searchDocumentModel, parameters);
+        return queryByLang(query, pageSize, currentPageIndex, currentPageOffset, maxResults, sortInfo, props,
+                searchDocumentModel, parameters);
     }
 
     protected DocumentModelList querySavedSearchByPageProvider(String pageProviderName, Long pageSize,
@@ -341,14 +350,11 @@ public class SearchObject extends QueryExecutor {
     }
 
     /**
-     * Retrieves the query string from the page provider and/or the query parameters.
-     * 
-     * @param providerName the page provider name
-     * @param parameters the parameters
-     * @return the query string
+     * Retrieves the page provider from the given page provider name and/or parameters.
+     *
+     * @since 2021.8
      */
-    protected String getQueryString(String providerName, MultivaluedMap<String, String> parameters) {
-
+    protected PageProvider<?> getPageProvider(String providerName, MultivaluedMap<String, String> parameters) {
         Map<String, String> namedParameters = getNamedParameters(parameters);
         Object[] queryParameters = getParameters(parameters);
         List<String> quickfilters = asStringList(parameters.getFirst(QUICK_FILTERS));
@@ -362,7 +368,25 @@ public class SearchObject extends QueryExecutor {
         PageProviderDefinition def = providerName == null ? PageProviderHelper.getQueryPageProviderDefinition(query)
                 : PageProviderHelper.getPageProviderDefinition(providerName);
 
-        PageProvider provider = PageProviderHelper.getPageProvider(ctx.getCoreSession(), def, namedParameters, sortBy, sortOrder, pageSize, currentPageIndex, null, quickfilters, queryParameters);
-        return PageProviderHelper.buildQueryString(provider);
+        return PageProviderHelper.getPageProvider(ctx.getCoreSession(), def, namedParameters, sortBy, sortOrder,
+                pageSize, currentPageIndex, null, quickfilters, queryParameters);
     }
+
+    /**
+     * Retrieves the query string from the given page provider name and/or parameters.
+     */
+    protected String getQueryString(String providerName, MultivaluedMap<String, String> parameters) {
+        PageProvider<?> pageProvider = getPageProvider(providerName, parameters);
+        return PageProviderHelper.buildQueryString(pageProvider);
+    }
+
+    /**
+     * Retrieves the query string from the given page provider.
+     *
+     * @since 2021.8
+     */
+    protected String getQueryString(PageProvider<?> pageProvider) {
+        return PageProviderHelper.buildQueryString(pageProvider);
+    }
+
 }

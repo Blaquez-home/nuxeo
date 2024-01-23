@@ -24,6 +24,7 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.apache.commons.lang3.StringUtils.defaultString;
 import static org.apache.logging.log4j.LogManager.ROOT_LOGGER_NAME;
 import static org.nuxeo.launcher.config.ConfigurationGenerator.NUXEO_PROFILES;
+import static org.nuxeo.common.concurrent.ThreadFactories.newThreadFactory;
 
 import java.io.Console;
 import java.io.File;
@@ -76,6 +77,7 @@ import org.apache.commons.cli.OptionGroup;
 import org.apache.commons.cli.Options;
 import org.apache.commons.cli.ParseException;
 import org.apache.commons.codec.binary.Base64;
+import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.IOUtils;
 import org.apache.commons.lang3.ArrayUtils;
 import org.apache.commons.lang3.StringUtils;
@@ -102,7 +104,6 @@ import org.nuxeo.launcher.config.ConfigurationGenerator;
 import org.nuxeo.launcher.connect.ConnectBroker;
 import org.nuxeo.launcher.connect.ConnectRegistrationBroker;
 import org.nuxeo.launcher.connect.LauncherRestartException;
-import org.nuxeo.launcher.daemon.DaemonThreadFactory;
 import org.nuxeo.launcher.gui.NuxeoLauncherGUI;
 import org.nuxeo.launcher.info.CommandInfo;
 import org.nuxeo.launcher.info.CommandSetInfo;
@@ -612,8 +613,7 @@ public abstract class NuxeoLauncher {
 
     protected String pid;
 
-    private ExecutorService executor = Executors.newSingleThreadExecutor(
-            new DaemonThreadFactory("NuxeoProcessThread", false));
+    private final ExecutorService executor = Executors.newSingleThreadExecutor(newThreadFactory("NuxeoProcessThread"));
 
     private ShutdownThread shutdownHook;
 
@@ -2102,6 +2102,14 @@ public abstract class NuxeoLauncher {
                         configurationGenerator.getUserConfig().getProperty(ConfigurationGenerator.PARAM_WIZARD_DONE,
                                 "true"));
                 return doStart(logProcessOutput);
+            }
+
+            // clean up temporary directory if needed
+            CryptoProperties userConfig = configurationGenerator.getUserConfig();
+            if (Boolean.parseBoolean(userConfig.getProperty("nuxeo.startup.clean.tmp.dir", "false"))) {
+                File tmpFile = new File(userConfig.getProperty(Environment.NUXEO_TMP_DIR));
+                log.info("Deleting content of temporary directory: " + tmpFile);
+                FileUtils.cleanDirectory(tmpFile);
             }
 
             start(logProcessOutput);

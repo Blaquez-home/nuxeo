@@ -22,13 +22,14 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
-import static org.mockserver.integration.ClientAndProxy.startClientAndProxy;
 import static org.mockserver.integration.ClientAndServer.startClientAndServer;
 import static org.mockserver.model.HttpRequest.request;
 import static org.mockserver.model.HttpResponse.response;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -43,8 +44,7 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.mockserver.client.server.MockServerClient;
-import org.mockserver.integration.ClientAndProxy;
+import org.mockserver.client.MockServerClient;
 import org.mockserver.integration.ClientAndServer;
 import org.mockserver.matchers.Times;
 import org.mockserver.model.BinaryBody;
@@ -64,6 +64,7 @@ import org.nuxeo.runtime.test.runner.Deploy;
 import org.nuxeo.runtime.test.runner.Features;
 import org.nuxeo.runtime.test.runner.FeaturesRunner;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 /**
@@ -75,35 +76,32 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 @Deploy("org.nuxeo.ecm.automation.features")
 public class HTTPHelperTest {
 
-    @Inject
-    CoreSession session;
+    protected static final String SERVER_HOST = "localhost";
+
+    protected static final String SERVER_PATH = "/ws/path/"; // NOSONAR
+
+    protected static final int SERVER_PORT = 1080;
+
+    protected static final String SERVER_URL = "http://" + SERVER_HOST + ":" + SERVER_PORT + SERVER_PATH;
+
+    protected static final String IMAGE_FILENAME = "sample.jpeg";
 
     @Inject
-    ContextService ctxService;
+    protected CoreSession session;
 
-    OperationContext ctx;
+    @Inject
+    protected ContextService ctxService;
 
-    protected ClientAndProxy proxy;
+    protected OperationContext ctx;
 
     protected ClientAndServer mockServer;
 
-    protected final static String SERVER_HOST = "localhost";
-
-    protected final static String SERVER_PATH = "/ws/path/";
-
-    protected final static int SERVER_PORT = 1080;
-
-    protected final static String SERVER_URL = "http://" + SERVER_HOST + ":" + String.valueOf(SERVER_PORT)
-            + SERVER_PATH;
-
-    protected final static String IMAGE_FILENAME = "sample.jpeg";
-
-    private final JsonBody DEFAULT_HTTP_RESPONSE = new JsonBody("{\"message\": \"Default answer to requests.\"}");
+    protected static final JsonBody DEFAULT_HTTP_RESPONSE = new JsonBody(
+            "{\"message\": \"Default answer to requests.\"}");
 
     @Before
-    public void setUp() throws Exception {
+    public void setUp() {
         mockServer = startClientAndServer(1080);
-        proxy = startClientAndProxy(1090);
 
         ctx = new OperationContext(session);
 
@@ -115,45 +113,48 @@ public class HTTPHelperTest {
     }
 
     @After
-    public void tearDown() throws Exception {
-        proxy.stop();
+    public void tearDown() {
         mockServer.stop();
     }
 
     @Test
     public void testHTTPHelperGet() {
-        createMockServer("GET", SERVER_PATH, DEFAULT_HTTP_RESPONSE);
-        try {
+        try (MockServerClient mockServerClient = createMockServer("GET", SERVER_PATH, DEFAULT_HTTP_RESPONSE)) {
             String expr = String.format(
                     "HTTP.get(\'%s\', {'auth' : { 'method' : 'basic', 'username' : 'test', 'password' : 'test' }})",
                     SERVER_URL);
             Blob resultBlob = (Blob) Scripting.newExpression(expr).eval(ctx);
-            String result = IOUtils.toString(resultBlob.getStream(), "utf-8");
-            ObjectMapper mapper = new ObjectMapper();
-            Map<String, String> jsonResult = mapper.readValue(result, Map.class);
+            try (InputStream is = resultBlob.getStream()) {
+                String result = IOUtils.toString(is, StandardCharsets.UTF_8);
+                ObjectMapper mapper = new ObjectMapper();
+                Map<String, String> jsonResult = mapper.readValue(result, new TypeReference<Map<String, String>>() {
+                });
 
-            String message = jsonResult.get("message");
-            assertEquals("Default answer to requests.", message);
+                String message = jsonResult.get("message"); // NOSONAR
+                assertEquals("Default answer to requests.", message); // NOSONAR
+            }
         } catch (IOException exception) {
-            fail("Problem parsing the result. " + exception);
+            fail("Problem parsing the result. " + exception); // NOSONAR
         }
     }
 
     @Test
     public void testHTTPHelperGetWithParams() {
-        createMockServer("GET", SERVER_PATH, DEFAULT_HTTP_RESPONSE);
-        try {
+        try (MockServerClient mockServerClient = createMockServer("GET", SERVER_PATH, DEFAULT_HTTP_RESPONSE)) {
             String expr = String.format(
                     "HTTP.get(\'%s\', " + "{'auth' : { 'method' : 'basic', 'username' : 'test', 'password' : 'test' }, "
                             + "'params' : { 'param1' : [ 'value1' ] , 'param2' : [ 'value2' ] }})",
                     SERVER_URL);
             Blob resultBlob = (Blob) Scripting.newExpression(expr).eval(ctx);
-            String result = IOUtils.toString(resultBlob.getStream(), "utf-8");
-            ObjectMapper mapper = new ObjectMapper();
-            Map<String, String> jsonResult = mapper.readValue(result, Map.class);
+            try (InputStream is = resultBlob.getStream()) {
+                String result = IOUtils.toString(is, StandardCharsets.UTF_8);
+                ObjectMapper mapper = new ObjectMapper();
+                Map<String, String> jsonResult = mapper.readValue(result, new TypeReference<Map<String, String>>() {
+                });
 
-            String message = jsonResult.get("message");
-            assertEquals("Default answer to requests.", message);
+                String message = jsonResult.get("message");
+                assertEquals("Default answer to requests.", message);
+            }
         } catch (IOException exception) {
             fail("Problem parsing the result. " + exception.getMessage());
         }
@@ -161,19 +162,21 @@ public class HTTPHelperTest {
 
     @Test
     public void testHTTPHelperGetWithHeaders() {
-        createMockServer("GET", SERVER_PATH, DEFAULT_HTTP_RESPONSE);
-        try {
+        try (MockServerClient mockServerClient = createMockServer("GET", SERVER_PATH, DEFAULT_HTTP_RESPONSE)) {
             String expr = String.format(
                     "HTTP.get(\'%s\', " + "{'auth' : { 'method' : 'basic', 'username' : 'test', 'password' : 'test' }, "
                             + "'headers' : { 'Accept' : 'application/json' , 'User-Agent' : 'Mozilla/5.0' }})",
                     SERVER_URL);
             Blob resultBlob = (Blob) Scripting.newExpression(expr).eval(ctx);
-            String result = IOUtils.toString(resultBlob.getStream(), "utf-8");
-            ObjectMapper mapper = new ObjectMapper();
-            Map<String, String> jsonResult = mapper.readValue(result, Map.class);
+            try (InputStream is = resultBlob.getStream()) {
+                String result = IOUtils.toString(is, StandardCharsets.UTF_8);
+                ObjectMapper mapper = new ObjectMapper();
+                Map<String, String> jsonResult = mapper.readValue(result, new TypeReference<Map<String, String>>() {
+                });
 
-            String message = jsonResult.get("message");
-            assertEquals("Default answer to requests.", message);
+                String message = jsonResult.get("message");
+                assertEquals("Default answer to requests.", message);
+            }
         } catch (IOException exception) {
             fail("Problem parsing the result. " + exception.getMessage());
         }
@@ -181,18 +184,20 @@ public class HTTPHelperTest {
 
     @Test
     public void testHTTPHelperPost() {
-        createMockServer("POST", SERVER_PATH, DEFAULT_HTTP_RESPONSE);
-        try {
+        try (MockServerClient mockServerClient = createMockServer("POST", SERVER_PATH, DEFAULT_HTTP_RESPONSE)) {
             String expr = String.format(
                     "HTTP.post(\'%s\', 'Test', {'auth' : { 'method' : 'basic', 'username' : 'test', 'password' : 'test' }})",
                     SERVER_URL);
             Blob resultBlob = (Blob) Scripting.newExpression(expr).eval(ctx);
-            String result = IOUtils.toString(resultBlob.getStream(), "utf-8");
-            ObjectMapper mapper = new ObjectMapper();
-            Map<String, String> jsonResult = mapper.readValue(result, Map.class);
+            try (InputStream is = resultBlob.getStream()) {
+                String result = IOUtils.toString(is, StandardCharsets.UTF_8);
+                ObjectMapper mapper = new ObjectMapper();
+                Map<String, String> jsonResult = mapper.readValue(result, new TypeReference<Map<String, String>>() {
+                });
 
-            String message = jsonResult.get("message");
-            assertEquals("Default answer to requests.", message);
+                String message = jsonResult.get("message");
+                assertEquals("Default answer to requests.", message);
+            }
         } catch (IOException exception) {
             fail("Problem parsing the result. " + exception);
         }
@@ -200,18 +205,20 @@ public class HTTPHelperTest {
 
     @Test
     public void testHTTPHelperPut() {
-        createMockServer("PUT", SERVER_PATH, DEFAULT_HTTP_RESPONSE);
-        try {
+        try (MockServerClient mockServerClient = createMockServer("PUT", SERVER_PATH, DEFAULT_HTTP_RESPONSE)) {
             String expr = String.format(
                     "HTTP.put(\'%s\', 'Test', {'auth' : { 'method' : 'basic', 'username' : 'test', 'password' : 'test' }})",
                     SERVER_URL);
             Blob resultBlob = (Blob) Scripting.newExpression(expr).eval(ctx);
-            String result = IOUtils.toString(resultBlob.getStream(), "utf-8");
-            ObjectMapper mapper = new ObjectMapper();
-            Map<String, String> jsonResult = mapper.readValue(result, Map.class);
+            try (InputStream is = resultBlob.getStream()) {
+                String result = IOUtils.toString(is, StandardCharsets.UTF_8);
+                ObjectMapper mapper = new ObjectMapper();
+                Map<String, String> jsonResult = mapper.readValue(result, new TypeReference<Map<String, String>>() {
+                });
 
-            String message = jsonResult.get("message");
-            assertEquals("Default answer to requests.", message);
+                String message = jsonResult.get("message");
+                assertEquals("Default answer to requests.", message);
+            }
         } catch (IOException exception) {
             fail("Problem parsing the result. " + exception);
         }
@@ -219,18 +226,20 @@ public class HTTPHelperTest {
 
     @Test
     public void testHTTPHelperDelete() {
-        createMockServer("DELETE", SERVER_PATH, DEFAULT_HTTP_RESPONSE);
-        try {
+        try (MockServerClient mockServerClient = createMockServer("DELETE", SERVER_PATH, DEFAULT_HTTP_RESPONSE)) {
             String expr = String.format(
                     "HTTP.delete(\'%s\', 'Test', {'auth' : { 'method' : 'basic', 'username' : 'test', 'password' : 'test' }})",
                     SERVER_URL);
             Blob resultBlob = (Blob) Scripting.newExpression(expr).eval(ctx);
-            String result = IOUtils.toString(resultBlob.getStream(), "utf-8");
-            ObjectMapper mapper = new ObjectMapper();
-            Map<String, String> jsonResult = mapper.readValue(result, Map.class);
+            try (InputStream is = resultBlob.getStream()) {
+                String result = IOUtils.toString(is, StandardCharsets.UTF_8);
+                ObjectMapper mapper = new ObjectMapper();
+                Map<String, String> jsonResult = mapper.readValue(result, new TypeReference<Map<String, String>>() {
+                });
 
-            String message = jsonResult.get("message");
-            assertEquals("Default answer to requests.", message);
+                String message = jsonResult.get("message");
+                assertEquals("Default answer to requests.", message);
+            }
         } catch (IOException exception) {
             fail("Problem parsing the result. " + exception);
         }
@@ -238,21 +247,24 @@ public class HTTPHelperTest {
 
     @Test
     public void testHTTPHelperGetDownloadFile() {
+        @SuppressWarnings("rawtypes")
+        Body responseBody = null;
         try {
             File file = org.nuxeo.common.utils.FileUtils.getResourceFileFromContext("test-data/sample.jpeg");
             byte[] answer = FileUtils.readFileToByteArray(file);
-            Body responseBody = new BinaryBody(answer);
-            createMockServer("GET", SERVER_PATH + IMAGE_FILENAME, responseBody);
+            responseBody = new BinaryBody(answer);
         } catch (IOException e) {
             fail("Error reading the image file." + e.getMessage());
         }
 
-        String expr = String.format(
-                "HTTP.get(\'%s\', {'auth' : { 'method' : 'basic', 'username' : 'test', 'password' : 'test' }})",
-                SERVER_URL + IMAGE_FILENAME);
-        Blob httpResult = (Blob) Scripting.newExpression(expr).eval(ctx);
-        assertTrue(httpResult.getLength() > 0);
-        assertEquals(httpResult.getFilename(), IMAGE_FILENAME);
+        try (MockServerClient mockServerClient = createMockServer("GET", SERVER_PATH + IMAGE_FILENAME, responseBody)) {
+            String expr = String.format(
+                    "HTTP.get(\'%s\', {'auth' : { 'method' : 'basic', 'username' : 'test', 'password' : 'test' }})",
+                    SERVER_URL + IMAGE_FILENAME);
+            Blob httpResult = (Blob) Scripting.newExpression(expr).eval(ctx);
+            assertTrue(httpResult.getLength() > 0);
+            assertEquals(httpResult.getFilename(), IMAGE_FILENAME);
+        }
     }
 
     /**
@@ -262,7 +274,7 @@ public class HTTPHelperTest {
      * @param path the path of the requests
      * @param answer the body of the http response
      */
-    public void createMockServer(String method, String path, Body answer) {
+    public MockServerClient createMockServer(String method, String path, @SuppressWarnings("rawtypes") Body answer) {
         List<Header> requestHeaders = new ArrayList<>();
         requestHeaders.add(new Header(HttpHeaders.AUTHORIZATION, "Basic dGVzdDp0ZXN0"));
 
@@ -270,14 +282,12 @@ public class HTTPHelperTest {
         responseHeaders.add(new Header(HttpHeaders.CONTENT_TYPE, "application/json; charset=utf-8"));
         responseHeaders.add(new Header(HttpHeaders.CACHE_CONTROL, "public, max-age=86400"));
 
-        new MockServerClient(SERVER_HOST, SERVER_PORT)
-                  .when(request().withHeaders(requestHeaders)
-                                 .withMethod(method)
-                                 .withPath(path),
-                          Times.exactly(2))
-                  .respond(response().withStatusCode(200)
-                                     .withHeaders(responseHeaders)
-                                     .withBody(answer)
-                                     .withDelay(new Delay(TimeUnit.SECONDS, 1)));
+        MockServerClient mockServerClient = new MockServerClient(SERVER_HOST, SERVER_PORT);
+        mockServerClient.when(request().withHeaders(requestHeaders).withMethod(method).withPath(path), Times.exactly(2))
+                        .respond(response().withStatusCode(200)
+                                           .withHeaders(responseHeaders)
+                                           .withBody(answer.getRawBytes())
+                                           .withDelay(new Delay(TimeUnit.SECONDS, 1)));
+        return mockServerClient;
     }
 }

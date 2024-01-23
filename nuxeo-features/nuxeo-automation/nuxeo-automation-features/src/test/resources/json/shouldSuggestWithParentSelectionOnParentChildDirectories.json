@@ -55,6 +55,25 @@
             "absoluteLabel": "Parent 10/Sub 20/Sub Sub 10"
           }
         ]
+      },
+      {
+        "parent": "10",
+        "ordering": 10000000,
+        "obsolete": 0,
+        "id": "30",
+        "displayLabel": "Sub 30",
+        "label": "Sub 30",
+        "directoryName": "subdir",
+        "properties": {
+          "parent": "10",
+          "ordering": 10000000,
+          "obsolete": 0,
+          "id": "30",
+          "label": "Sub 30"
+        },
+        "entity-type": "directoryEntry",
+        "computedId": "10/30",
+        "absoluteLabel": "Parent 10/Sub 30"
       }
     ]
   },

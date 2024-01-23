@@ -272,7 +272,7 @@ public class LocalBinaryManager extends AbstractBinaryManager {
         @Override
         public void start() {
             if (startTime != 0) {
-                throw new RuntimeException("Alread started");
+                throw new RuntimeException("Already started");
             }
             startTime = System.currentTimeMillis();
             status = new BinaryManagerStatus();
@@ -295,6 +295,11 @@ public class LocalBinaryManager extends AbstractBinaryManager {
             }
             deleteOld(binaryManager.getStorageDir(), startTime - TIME_RESOLUTION, 0, delete);
             status.gcDuration = System.currentTimeMillis() - startTime;
+            startTime = 0;
+        }
+
+        @Override
+        public void reset() {
             startTime = 0;
         }
 

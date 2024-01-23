@@ -58,12 +58,15 @@ import org.nuxeo.ecm.core.api.NuxeoException;
 import org.nuxeo.ecm.core.api.PartialList;
 import org.nuxeo.ecm.core.api.PropertyException;
 import org.nuxeo.ecm.core.api.ScrollResult;
+import org.nuxeo.ecm.core.api.impl.DownloadBlobGuard;
+import org.nuxeo.ecm.core.api.local.ClientLoginModule;
 import org.nuxeo.ecm.core.api.repository.FulltextConfiguration;
 import org.nuxeo.ecm.core.api.repository.RepositoryManager;
 import org.nuxeo.ecm.core.api.security.ACL;
 import org.nuxeo.ecm.core.api.security.SecurityConstants;
 import org.nuxeo.ecm.core.blob.BlobInfo;
 import org.nuxeo.ecm.core.blob.DocumentBlobManager;
+import org.nuxeo.ecm.core.model.BaseSession;
 import org.nuxeo.ecm.core.model.Document;
 import org.nuxeo.ecm.core.model.LockManager;
 import org.nuxeo.ecm.core.query.QueryFilter;
@@ -409,12 +412,15 @@ public class SessionImpl implements Session, XAResource {
         }
         markIndexingInProgress(dirtyIds);
         List<Work> works = new ArrayList<>(dirtyIds.size());
+        boolean okToDownloadBlob = !DownloadBlobGuard.isEnable();
         for (Serializable id : dirtyIds) {
             boolean updateSimpleText = dirtyStrings.contains(id);
-            boolean updateBinaryText = dirtyBinaries.contains(id);
-            Work work = new FulltextExtractorWork(repository.getName(), model.idToString(id), updateSimpleText,
-                    updateBinaryText, true);
-            works.add(work);
+            boolean updateBinaryText = okToDownloadBlob && dirtyBinaries.contains(id);
+            if (updateBinaryText || updateSimpleText) {
+                Work work = new FulltextExtractorWork(repository.getName(), model.idToString(id), updateSimpleText,
+                        updateBinaryText, true);
+                works.add(work);
+            }
         }
         return works;
     }
@@ -989,9 +995,7 @@ public class SessionImpl implements Session, XAResource {
                                                     .map(info -> info.id)
                                                     .collect(Collectors.toSet());
         if (!undeletableIds.isEmpty()) {
-            // in tests we may want to delete everything
-            boolean allowDeleteUndeletable = Framework.isBooleanPropertyTrue(PROP_ALLOW_DELETE_UNDELETABLE_DOCUMENTS);
-            if (!allowDeleteUndeletable) {
+            if (!BaseSession.canDeleteUndeletable(ClientLoginModule.getCurrentPrincipal())) {
                 if (undeletableIds.contains(id)) {
                     throw new DocumentExistsException("Cannot remove " + id + ", it is under retention / hold");
                 } else {
@@ -1411,6 +1415,7 @@ public class SessionImpl implements Session, XAResource {
             mapper.commit(xid, onePhase);
         } finally {
             commitDone();
+            DownloadBlobGuard.disable();
         }
     }
 
@@ -1438,6 +1443,7 @@ public class SessionImpl implements Session, XAResource {
             }
         } finally {
             inTransaction = false;
+            DownloadBlobGuard.disable();
             // no invalidations to send
             checkThreadEnd();
         }

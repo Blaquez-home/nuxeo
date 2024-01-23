@@ -27,6 +27,7 @@ import static org.nuxeo.ecm.core.storage.dbs.DBSDocument.KEY_LOCK_CREATED;
 import static org.nuxeo.ecm.core.storage.dbs.DBSDocument.KEY_LOCK_OWNER;
 import static org.nuxeo.ecm.core.storage.dbs.DBSDocument.KEY_NAME;
 import static org.nuxeo.ecm.core.storage.dbs.DBSDocument.KEY_PARENT_ID;
+import static org.nuxeo.ecm.core.storage.dbs.DBSRepository.DBSQueryOperator.IN;
 
 import java.io.Serializable;
 import java.lang.reflect.Array;
@@ -35,6 +36,7 @@ import java.util.Arrays;
 import java.util.Calendar;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
@@ -70,7 +72,7 @@ import org.nuxeo.ecm.core.storage.dbs.DBSDocument;
 import org.nuxeo.ecm.core.storage.dbs.DBSExpressionEvaluator;
 import org.nuxeo.ecm.core.storage.dbs.DBSRepositoryBase;
 import org.nuxeo.ecm.core.storage.dbs.DBSSession.OrderByComparator;
-import org.nuxeo.ecm.core.storage.dbs.DBSTransactionState.ChangeTokenUpdater;
+import org.nuxeo.ecm.core.storage.dbs.DBSTransactionState.ConditionalUpdates;
 import org.nuxeo.runtime.api.Framework;
 
 /**
@@ -180,7 +182,7 @@ public class MemRepository extends DBSRepositoryBase {
     }
 
     @Override
-    public void updateState(String id, StateDiff diff, ChangeTokenUpdater changeTokenUpdater) {
+    public void updateState(String id, StateDiff diff, ConditionalUpdates conditionalUpdates) {
         if (log.isTraceEnabled()) {
             log.trace("Mem: UPDATE " + id + ": " + diff);
         }
@@ -189,14 +191,14 @@ public class MemRepository extends DBSRepositoryBase {
             throw new ConcurrentUpdateException("Missing: " + id);
         }
         synchronized (state) {
-            // synchronization needed for atomic change token
-            if (changeTokenUpdater != null) {
-                for (Entry<String, Serializable> en : changeTokenUpdater.getConditions().entrySet()) {
+            // synchronization needed for atomic conditions
+            if (conditionalUpdates != null) {
+                for (Entry<String, Serializable> en : conditionalUpdates.getConditions().entrySet()) {
                     if (!Objects.equals(state.get(en.getKey()), en.getValue())) {
                         throw new ConcurrentUpdateException((String) state.get(KEY_ID));
                     }
                 }
-                for (Entry<String, Serializable> en : changeTokenUpdater.getUpdates().entrySet()) {
+                for (Entry<String, Serializable> en : conditionalUpdates.getUpdates().entrySet()) {
                     applyDiff(state, en.getKey(), en.getValue());
                 }
             }
@@ -328,6 +330,28 @@ public class MemRepository extends DBSRepositoryBase {
             log.trace("Mem:    -> absent");
         }
         return false;
+    }
+
+    @Override
+    public List<State> queryKeyValueWithOperator(String key1, Object value1, String key2, DBSQueryOperator operator,
+            Object value2, Set<String> ignored) {
+        List<State> results = new ArrayList<>();
+        if (IN.equals(operator)) {
+            HashSet<Object> possibleValues = new HashSet<>((Collection<?>) value2);
+            states.forEach((id, state) -> {
+                if (ignored.contains(id)) {
+                    return;
+                }
+                if (state.get(key1) == value1) {
+                    if (possibleValues.contains(state.get(key2))) {
+                        results.add(state);
+                    }
+                }
+            });
+        } else {
+            throw new IllegalArgumentException(String.format("Unknown operator: %s", operator));
+        }
+        return results;
     }
 
     @Override

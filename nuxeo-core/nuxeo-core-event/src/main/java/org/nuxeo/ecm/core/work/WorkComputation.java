@@ -92,8 +92,8 @@ public class WorkComputation extends AbstractComputation {
                 boolean storeState = Framework.getService(ConfigurationService.class)
                                               .isBooleanPropertyTrue(STORESTATE_KEY);
                 if (storeState) {
-                    if (WorkStateHelper.getState(work.getId()) != Work.State.SCHEDULED) {
-                        log.warn("work has been canceled, saving and returning");
+                    if (WorkStateHelper.isCanceled(work.getId())) {
+                        log.warn("Skipping canceled work id: {}", work.getId());
                         context.askForCheckpoint();
                         return;
                     }

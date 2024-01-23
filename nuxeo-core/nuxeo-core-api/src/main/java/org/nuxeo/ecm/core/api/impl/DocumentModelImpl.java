@@ -162,6 +162,9 @@ public class DocumentModelImpl implements DocumentModel, Cloneable {
     // loaded if isStateLoaded
     protected String checkinComment;
 
+    // loaded if isStateLoaded
+    protected Calendar checkinDate;
+
     // acp is not send between client/server
     // it will be loaded lazy first time it is accessed
     // and discarded when object is serialized
@@ -378,10 +381,6 @@ public class DocumentModelImpl implements DocumentModel, Cloneable {
                         loadDataModel(schema);
                     }
                 }
-                // fetch ACP too if possible
-                if (ref != null) {
-                    getACP();
-                }
                 detachedVersionLabel = getVersionLabel();
                 // load some system info
                 isCheckedOut();
@@ -392,6 +391,10 @@ public class DocumentModelImpl implements DocumentModel, Cloneable {
                 isRecord();
                 getRetainUntil();
                 hasLegalHold();
+                // fetch ACP too if possible
+                if (ref != null) {
+                    getACP();
+                }
             }
         } finally {
             sid = null;
@@ -705,6 +708,14 @@ public class DocumentModelImpl implements DocumentModel, Cloneable {
             refresh(REFRESH_STATE, null);
         }
         return checkinComment;
+    }
+
+    @Override
+    public Calendar getCheckinDate() {
+        if (!isStateLoaded) {
+            refresh(REFRESH_STATE, null);
+        }
+        return checkinDate;
     }
 
     @Override
@@ -1423,6 +1434,7 @@ public class DocumentModelImpl implements DocumentModel, Cloneable {
             isVersionSeriesCheckedOut = refresh.isVersionSeriesCheckedOut;
             versionSeriesId = refresh.versionSeriesId;
             checkinComment = refresh.checkinComment;
+            checkinDate = refresh.checkinDate;
             isTrashed = refresh.isTrashed;
             isRecord = refresh.isRecord;
             retainUntil = refresh.retainUntil;

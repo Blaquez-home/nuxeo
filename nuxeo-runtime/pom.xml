@@ -4,7 +4,7 @@
   <parent>
     <groupId>org.nuxeo</groupId>
     <artifactId>nuxeo-ecm</artifactId>
-    <version>10.10-HF50-SNAPSHOT</version>
+    <version>10.10-HF74-SNAPSHOT</version>
   </parent>
 
   <groupId>org.nuxeo.runtime</groupId>
@@ -22,6 +22,7 @@
     <module>nuxeo-runtime-reload</module>
     <module>nuxeo-runtime-osgi</module>
     <module>nuxeo-runtime-launcher</module>
+    <module>nuxeo-runtime-log4j</module>
     <module>nuxeo-runtime-tomcat-adapter</module>
     <module>nuxeo-runtime-management</module>
     <module>nuxeo-runtime-metrics</module>

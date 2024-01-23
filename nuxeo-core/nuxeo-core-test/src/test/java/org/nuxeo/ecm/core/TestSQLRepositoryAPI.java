@@ -64,6 +64,7 @@ import org.apache.commons.lang3.mutable.MutableObject;
 import org.junit.Ignore;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.nuxeo.common.function.ThrowableRunnable;
 import org.nuxeo.common.utils.Path;
 import org.nuxeo.ecm.core.api.AbstractSession;
 import org.nuxeo.ecm.core.api.Blob;
@@ -125,6 +126,7 @@ import org.nuxeo.ecm.core.schema.FacetNames;
 import org.nuxeo.ecm.core.schema.SchemaManager;
 import org.nuxeo.ecm.core.schema.SchemaManagerImpl;
 import org.nuxeo.ecm.core.schema.types.Schema;
+import org.nuxeo.ecm.core.security.RetentionExpiredAction.RetentionExpiredComputation;
 import org.nuxeo.ecm.core.security.RetentionExpiredFinderListener;
 import org.nuxeo.ecm.core.storage.sql.listeners.DummyBeforeModificationListener;
 import org.nuxeo.ecm.core.test.CoreFeature;
@@ -225,6 +227,18 @@ public class TestSQLRepositoryAPI {
      */
     protected void maybeSleepToNextSecond() {
         coreFeature.getStorageConfiguration().maybeSleepToNextSecond();
+    }
+
+    /** Helper function to build a simple map with minimal syntax. */
+    protected static Map<String, Serializable> map(Object... values) {
+        if (values.length % 2 != 0) {
+            throw new IllegalArgumentException("Invalid number of parameters");
+        }
+        Map<String, Serializable> map = new HashMap<>();
+        for (int i = 0; i < values.length; i += 2) {
+            map.put((String) values[i], (Serializable) values[i+1]);
+        }
+        return map;
     }
 
     /**
@@ -760,7 +774,7 @@ public class TestSQLRepositoryAPI {
             session.getChild(root.getRef(), "nosuchchild");
             fail("Should fail with DocumentNotFoundException");
         } catch (DocumentNotFoundException e) {
-            assertEquals("nosuchchild", e.getMessage());
+            assertTrue(e.getMessage(), e.getMessage().contains("nosuchchild"));
         }
     }
 
@@ -2767,7 +2781,7 @@ public class TestSQLRepositoryAPI {
             session.getChild(new PathRef("/folder"), "doc");
             fail("should not find child moved under /folder in another transaction");
         } catch (DocumentNotFoundException e) {
-            assertEquals("doc", e.getMessage());
+            assertTrue(e.getMessage(), e.getMessage().contains("doc"));
         }
     }
 
@@ -3603,6 +3617,62 @@ public class TestSQLRepositoryAPI {
         // check visible from live doc
         doc = session.getDocument(doc.getRef());
         assertEquals("the title again", doc.getProperty("dublincore", "title"));
+    }
+
+    // NXP-30914
+    @Test
+    @Deploy("org.nuxeo.ecm.core.test.tests:OSGI-INF/test-proxy-creation-restricted-contrib.xml")
+    public void testLiveProxyRestricted() {
+        testLiveProxyCreation(true);
+    }
+
+    // NXP-30914
+    @Test
+    public void testLiveProxyUnrestricted() {
+        testLiveProxyCreation(false);
+    }
+
+    protected void testLiveProxyCreation(boolean restricted) {
+        // create live proxy target document
+        DocumentModel doc = session.createDocumentModel("/", "liveProxyTarget", "File");
+        doc = session.createDocument(doc);
+        DocumentRef docRef = doc.getRef();
+
+        // create live proxy parent folder
+        DocumentModel parent = session.createDocumentModel("/", "liveProxyParent", "Folder");
+        parent = session.createDocument(parent);
+        DocumentRef parentRef = parent.getRef();
+
+        // try to create live proxy as user with Read access only on target document
+        try (CloseableCoreSession joeSession = openSessionAs("joe")) {
+            // need at least AddChildren and ReadLifeCycle on proxy parent folder
+            setPermission(parentRef, "joe", "ReadWrite");
+            setPermission(docRef, "joe", "Read");
+            if (restricted) {
+                try {
+                    joeSession.createProxy(docRef, parentRef);
+                    fail("Proxy creation should've failed for unauthorized user.");
+                } catch (DocumentSecurityException e) {
+                    assertEquals("Privilege 'Write' is not granted to 'joe'", e.getMessage());
+                }
+            } else {
+                DocumentModel proxy = joeSession.createProxy(docRef, parentRef);
+                assertTrue(proxy.isProxy());
+            }
+
+            // create live proxy as user with Write access on target document
+            setPermission(docRef, "joe", "ReadWrite");
+            DocumentModel proxy = joeSession.createProxy(docRef, parentRef);
+            assertTrue(proxy.isProxy());
+        }
+    }
+
+    protected void setPermission(DocumentRef docRef, String username, String permission) {
+        ACP acp = session.getACP(docRef);
+        ACL localACL = acp.getOrCreateACL(ACL.LOCAL_ACL);
+        ACE ace = new ACE(username, permission);
+        localACL.add(ace);
+        session.setACP(docRef, acp, true);
     }
 
     @Test
@@ -4844,6 +4914,37 @@ public class TestSQLRepositoryAPI {
     }
 
     @Test
+    public void testRetentionExpiresOnInvalidDocs() {
+        DocumentModel doc = session.createDocumentModel("/", "doc", "File");
+        doc = session.createDocument(doc);
+        session.makeRecord(doc.getRef());
+
+        // set retention to current time
+        Calendar now = Calendar.getInstance();
+        session.setRetainUntil(doc.getRef(), now, null);
+        session.save();
+
+        // Let's launch a computation with a valid and and invalid doc id
+        class DummyRetentionExpiredComputation extends RetentionExpiredComputation {
+            public boolean wentThrough(List<String> ids) {
+                try {
+                    super.compute(session, ids, null);
+                    return true;
+                } catch (NuxeoException e) {
+                    return false;
+                }
+            }
+        }
+        DummyRetentionExpiredComputation computation = new DummyRetentionExpiredComputation();
+        assertTrue(computation.wentThrough(Arrays.asList("foo", doc.getId())));
+
+        // valid doc has no retention anymore and can be deleted
+        doc = session.getDocument(doc.getRef());
+        assertNull(session.getRetainUntil(doc.getRef()));
+        session.removeDocument(doc.getRef());
+    }
+
+    @Test
     public void testRetentionExpiresAutomatically() throws Exception {
         DocumentModel folder = session.createDocumentModel("/", "fold", "Folder");
         folder = session.createDocument(folder);
@@ -4867,10 +4968,10 @@ public class TestSQLRepositoryAPI {
         // trigger manually instead of waiting for scheduler
         new RetentionExpiredFinderListener().handleEvent(null);
         // wait for all bulk commands to be executed
+        nextTransaction();
         assertTrue("Bulk action didn't finish", bulkService.await(Duration.ofSeconds(60)));
 
         // re-acquire the doc in a new transaction
-        nextTransaction();
         doc = session.getDocument(doc.getRef());
 
         // it has no retention anymore and can be deleted
@@ -4884,7 +4985,12 @@ public class TestSQLRepositoryAPI {
         try {
             session.removeDocument(doc.getRef());
             fail("remove should fail");
+        } catch (DocumentSecurityException e) {
+            // Doc under retention or hold will cause this exception
+            assertEquals("Permission denied: cannot remove document " + doc.getId()
+                    + ", Missing permission 'Remove' on document " + doc.getId(), e.getMessage());
         } catch (DocumentExistsException e) {
+            // Descendants under retention or hold will cause this exception
             assertEquals("Cannot remove " + doc.getId() + ", it is under retention / hold", e.getMessage());
         }
 
@@ -5494,6 +5600,101 @@ public class TestSQLRepositoryAPI {
             if (err.getSuppressed().length != 0) {
                 throw err;
             }
+        }
+    }
+
+    @Test
+    public void testConcurrentArrayUpdateAndRemove() {
+        DocumentModel doc = session.createDocumentModel("/", "document", "MyDocType2");
+        doc.setPropertyValue("cpxl:complexList",
+                (Serializable) Arrays.asList(map("foo", "value-foo", "bar", "value-bar")));
+        doc = session.createDocument(doc);
+        DocumentRef docRef = doc.getRef();
+        nextTransaction();
+
+        // run concurrently an array complex element update and an array removal
+        // but with removal executed first
+        try {
+            CyclicBarrier barrier = new CyclicBarrier(2);
+            runConcurrently(() -> {
+                TransactionHelper.startTransaction();
+                DocumentModel document = session.getDocument(docRef);
+                // sync the two threads
+                barrier.await(5, TimeUnit.SECONDS);
+                document.setPropertyValue("cpxl:complexList", (Serializable) Collections.emptyList());
+                // the removal should occur before the update
+                session.saveDocument(document);
+                session.save();
+                TransactionHelper.commitOrRollbackTransaction();
+                barrier.await(50, TimeUnit.SECONDS);
+            }, () -> {
+                TransactionHelper.startTransaction();
+                DocumentModel document = session.getDocument(docRef);
+                // sync the two threads
+                barrier.await(5, TimeUnit.SECONDS);
+                document.setPropertyValue("cpxl:complexList/0/foo", "updated");
+                // the update should occur after the removal
+                barrier.await(5, TimeUnit.SECONDS);
+                session.saveDocument(document);
+                session.save();
+                TransactionHelper.commitOrRollbackTransaction();
+            });
+        } catch (NuxeoException e) {
+            if (isDBS()) {
+                assertEquals("Exceptions in threads", e.getMessage());
+                Throwable[] s = e.getSuppressed();
+                assertEquals(1, s.length);
+                Throwable s0 = s[0];
+                assertTrue(s0 instanceof ConcurrentUpdateException);
+                assertTrue(s0.getMessage(), s0.getMessage().startsWith("Failed to save session"));
+                return;
+            } else {
+                throw e;
+            }
+        }
+        if (isDBS()) {
+            fail("expected ConcurrentUpdateException");
+        } else {
+            // VCS doesn't detect this kind of concurrent update
+            // the update to the complex element will just fail to do anything
+            // as the element is now gone
+            doc.refresh();
+            assertEquals(Collections.emptyList(), doc.getPropertyValue("cpxl:complexList"));
+        }
+    }
+
+    @SafeVarargs
+    protected final void runConcurrently(ThrowableRunnable<Exception>... runnables) {
+        ExecutorService executor = Executors.newFixedThreadPool(runnables.length);
+        List<Exception> exceptions = Collections.synchronizedList(new ArrayList<Exception>());
+
+        // convert throwable runnables to regular runnable
+        // and submit the to the executor
+        Arrays.stream(runnables).map(r -> (Runnable) () -> {
+            try {
+                r.run();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new NuxeoException("Interrupted", e);
+            } catch (Exception e) {
+                exceptions.add(e);
+            }
+        }).forEach(executor::submit);
+
+        // shutdown executor and wait for termination
+        executor.shutdown();
+        try {
+            assertTrue(executor.awaitTermination(50, TimeUnit.SECONDS));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new NuxeoException("Interrupted", e);
+        }
+
+        // rethrow any exception that occurred during thread execution
+        if (!exceptions.isEmpty()) {
+            NuxeoException e = new NuxeoException("Exceptions in threads");
+            exceptions.forEach(e::addSuppressed);
+            throw e;
         }
     }
 

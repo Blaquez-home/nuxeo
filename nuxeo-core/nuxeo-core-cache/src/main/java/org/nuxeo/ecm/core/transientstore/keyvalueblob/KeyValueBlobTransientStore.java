@@ -31,21 +31,21 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 import java.util.function.Function;
 import java.util.stream.Stream;
 
 import org.apache.commons.lang3.SerializationUtils;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.nuxeo.ecm.core.api.Blob;
 import org.nuxeo.ecm.core.api.NuxeoException;
 import org.nuxeo.ecm.core.blob.BlobInfo;
 import org.nuxeo.ecm.core.blob.BlobManager;
 import org.nuxeo.ecm.core.blob.BlobManagerComponent;
 import org.nuxeo.ecm.core.blob.BlobProvider;
-import org.nuxeo.ecm.core.blob.ManagedBlob;
 import org.nuxeo.ecm.core.blob.binary.BinaryGarbageCollector;
 import org.nuxeo.ecm.core.transientstore.api.MaximumTransientSpaceExceeded;
 import org.nuxeo.ecm.core.transientstore.api.TransientStoreConfig;
@@ -54,6 +54,7 @@ import org.nuxeo.runtime.api.Framework;
 import org.nuxeo.runtime.kv.KeyValueService;
 import org.nuxeo.runtime.kv.KeyValueStore;
 import org.nuxeo.runtime.kv.KeyValueStoreProvider;
+import org.nuxeo.runtime.transaction.TransactionHelper;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -103,7 +104,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
  */
 public class KeyValueBlobTransientStore implements TransientStoreProvider {
 
-    private static final Log log = LogFactory.getLog(KeyValueBlobTransientStore.class);
+    private static final Logger log = LogManager.getLogger(KeyValueBlobTransientStore.class);
 
     public static final String SEP = ".";
 
@@ -161,6 +162,11 @@ public class KeyValueBlobTransientStore implements TransientStoreProvider {
     /** @since 11.1 */
     protected static final long LOCK_EXPONENTIAL_BACKOFF_AFTER_NANOS = TimeUnit.MILLISECONDS.toNanos(100);
 
+    /** @since 2021.17 */
+    protected static final long WARN_DURATION_MS_THRESHOLD = 300_000L; // 5min
+
+    protected String name;
+
     protected String keyValueStoreName;
 
     protected String blobProviderId;
@@ -183,7 +189,8 @@ public class KeyValueBlobTransientStore implements TransientStoreProvider {
 
     @Override
     public void init(TransientStoreConfig config) {
-        String defaultName = config.getName();
+        name = config.getName();
+        String defaultName = name;
         if (!defaultName.startsWith(BlobManagerComponent.TRANSIENT_ID_PREFIX)) {
             defaultName = BlobManagerComponent.TRANSIENT_ID_PREFIX + "_" + defaultName;
         }
@@ -200,6 +207,7 @@ public class KeyValueBlobTransientStore implements TransientStoreProvider {
         releaseTTL = config.getSecondLevelTTL() * 60;
         targetMaxSize = config.getTargetMaxSizeMB() * 1024L * 1024;
         absoluteMaxSize = config.getAbsoluteMaxSizeMB() * 1024L * 1024;
+        getBlobProvider(); // force explicit registration of the blob provider
     }
 
     protected KeyValueStore getKeyValueStore() {
@@ -265,9 +273,11 @@ public class KeyValueBlobTransientStore implements TransientStoreProvider {
     protected void computeStorageSize() {
         KeyValueStore kvs = getKeyValueStore();
         long size = keyStream().map(this::getBlobs) //
+                               .filter(Objects::nonNull)
                                .flatMap(Collection::stream)
                                .mapToLong(Blob::getLength)
                                .sum();
+        log.info("Storage size for {}: {} bytes", name, size);
         kvs.put(STORAGE_SIZE, String.valueOf(size));
     }
 
@@ -276,20 +286,38 @@ public class KeyValueBlobTransientStore implements TransientStoreProvider {
     public void doGC() {
         BlobProvider bp = getBlobProvider();
         BinaryGarbageCollector gc = bp.getBinaryGarbageCollector();
+        if (gc.isInProgress()) {
+            log.info("GC {} on storage {} already in progress", gc.getId(), name);
+            return;
+        }
+        TransactionHelper.commitOrRollbackTransaction();
         boolean delete = false;
-        gc.start();
-        // if a concurrent user of the key/value store adds new keys after this point,
-        // it's ok because the GC doesn't delete keys created after GC start
+        log.debug("Starting GC on storage {}, listing blob on {}", name, gc.getId());
         try {
+            gc.start();
+            // if a concurrent user of the key/value store adds new keys after this point,
+            // it's ok because the GC doesn't delete keys created after GC start
+            log.debug("Marking keys from KV");
             keyStream().map(this::getBlobKeys) //
                        .flatMap(Collection::stream)
                        .forEach(gc::mark);
             delete = true;
         } finally {
             // don't delete if there's an exception, but still stop the GC
-            gc.stop(delete);
+            log.debug("GC delete={}", delete);
+            if (gc.isInProgress()) {
+                gc.stop(delete);
+            } else {
+                log.debug("No GC in progress");
+            }
+            TransactionHelper.startTransaction();
         }
         computeStorageSize();
+        if (gc.getStatus().getGCDuration() > WARN_DURATION_MS_THRESHOLD) {
+            log.warn("GC completed for {}: {}", name, gc.getStatus());
+        } else {
+            log.debug("GC completed for {}: {}", name, gc.getStatus());
+        }
     }
 
     @Override
@@ -314,7 +342,7 @@ public class KeyValueBlobTransientStore implements TransientStoreProvider {
         try {
             return mapper.readValue(json, LIST_STRING);
         } catch (IOException e) {
-            log.error("Invalid JSON array: " + json);
+            log.error("Invalid JSON array: {}", json);
             return null;
         }
     }
@@ -326,7 +354,7 @@ public class KeyValueBlobTransientStore implements TransientStoreProvider {
         try {
             return mapper.readValue(json, MAP_STRING_STRING);
         } catch (IOException e) {
-            log.error("Invalid JSON object: " + json);
+            log.error("Invalid JSON object: {}", json);
             return null;
         }
     }
@@ -625,7 +653,8 @@ public class KeyValueBlobTransientStore implements TransientStoreProvider {
                 // ignore, the blob was removed from the blob provider
                 // maybe by a concurrent GC from this transient store
                 // or from the blob provider itself (if it's incorrectly shared)
-                log.debug("Failed to read blob: " + digest);
+                log.debug("Failed to read blob: {} in blob provider: {}  for transient store: {}", digest,
+                        blobProviderId, name);
             }
         }
         return blobs;

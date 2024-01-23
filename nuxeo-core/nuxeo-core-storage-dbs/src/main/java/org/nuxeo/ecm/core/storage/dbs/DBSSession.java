@@ -117,6 +117,7 @@ import org.nuxeo.ecm.core.api.PartialList;
 import org.nuxeo.ecm.core.api.PropertyException;
 import org.nuxeo.ecm.core.api.ScrollResult;
 import org.nuxeo.ecm.core.api.VersionModel;
+import org.nuxeo.ecm.core.api.local.ClientLoginModule;
 import org.nuxeo.ecm.core.api.repository.FulltextConfiguration;
 import org.nuxeo.ecm.core.api.security.ACE;
 import org.nuxeo.ecm.core.api.security.ACL;
@@ -348,7 +349,7 @@ public class DBSSession extends BaseSession {
         DBSDocumentState docState = transaction.getChildState(parentId, name);
         DBSDocument doc = getDocument(docState);
         if (doc == null) {
-            throw new DocumentNotFoundException(name);
+            throw new DocumentNotFoundException("parent: " + parentId + ", name: " + name);
         }
         return doc;
     }
@@ -455,7 +456,7 @@ public class DBSSession extends BaseSession {
         SchemaManager schemaManager = Framework.getService(SchemaManager.class);
         DocumentType type = schemaManager.getDocumentType(typeName);
         if (type == null) {
-            throw new DocumentNotFoundException("Unknown document type: " + typeName);
+            throw new DocumentNotFoundException("Unknown document type: " + typeName + " for doc: " + docState.getId());
         }
 
         boolean isProxy = TRUE.equals(docState.get(KEY_IS_PROXY));
@@ -463,7 +464,7 @@ public class DBSSession extends BaseSession {
             String targetId = (String) docState.get(KEY_PROXY_TARGET_ID);
             DBSDocumentState targetState = transaction.getStateForUpdate(targetId);
             if (targetState == null) {
-                throw new DocumentNotFoundException("Proxy has null target");
+                throw new DocumentNotFoundException("Proxy has null target for doc: " + docState.getId());
             }
         }
 
@@ -959,9 +960,7 @@ public class DBSSession extends BaseSession {
 
         // if a subdocument is under retention / hold, removal fails
         if (!undeletableIds.isEmpty()) {
-            // in tests we may want to delete everything
-            boolean allowDeleteUndeletable = Framework.isBooleanPropertyTrue(PROP_ALLOW_DELETE_UNDELETABLE_DOCUMENTS);
-            if (!allowDeleteUndeletable) {
+            if (!BaseSession.canDeleteUndeletable(ClientLoginModule.getCurrentPrincipal())) {
                 if (undeletableIds.contains(rootId)) {
                     throw new DocumentExistsException("Cannot remove " + rootId + ", it is under retention / hold");
                 } else {
@@ -971,12 +970,13 @@ public class DBSSession extends BaseSession {
             }
         }
 
-        // if a proxy target is removed, check that all proxies to it
-        // are removed
+        // if a proxy target is removed, check that all proxies to it are removed
         for (Entry<String, Object[]> en : targetProxies.entrySet()) {
             String targetId = en.getKey();
             for (Object proxyId : en.getValue()) {
-                if (!removedIds.contains(proxyId)) {
+                String pId = (String) proxyId;
+                // check also existence of proxy if it has been removed but removed document wasn't updated
+                if (!removedIds.contains(pId) && transaction.exists(pId)) {
                     throw new DocumentExistsException("Cannot remove " + rootId + ", subdocument " + targetId
                             + " is the target of proxy " + proxyId);
                 }
@@ -1324,7 +1324,7 @@ public class DBSSession extends BaseSession {
     @Override
     public ACP getACP(Document doc) {
         State state = transaction.getStateForRead(doc.getUUID());
-        return memToAcp(state.get(KEY_ACP));
+        return memToAcp(doc.getUUID(), state.get(KEY_ACP));
     }
 
     @Override
@@ -1394,7 +1394,7 @@ public class DBSSession extends BaseSession {
         return (Serializable) aclList;
     }
 
-    protected static ACP memToAcp(Serializable acpSer) {
+    protected static ACP memToAcp(String docId, Serializable acpSer) {
         if (acpSer == null) {
             return null;
         }
@@ -1411,10 +1411,20 @@ public class DBSSession extends BaseSession {
             }
             ACL acl = new ACLImpl(name);
             for (Serializable aceSer : aceList) {
+                if (aceSer == null) {
+                    log.warn(String.format("A null ACE has been detected on document: %s, continuing", docId));
+                    continue;
+                }
                 State aceMap = (State) aceSer;
+                Boolean granted = (Boolean) aceMap.get(KEY_ACE_GRANT);
+                if (granted == null) {
+                    log.warn(String.format(
+                            "An ACE with grant=null has been detected on document: %s, ace: %s, defaulting to grant=false",
+                            docId, aceMap));
+                    granted = Boolean.FALSE;
+                }
                 String username = (String) aceMap.get(KEY_ACE_USER);
                 String permission = (String) aceMap.get(KEY_ACE_PERMISSION);
-                boolean granted = (boolean) aceMap.get(KEY_ACE_GRANT);
                 String creator = (String) aceMap.get(KEY_ACE_CREATOR);
                 Calendar begin = (Calendar) aceMap.get(KEY_ACE_BEGIN);
                 Calendar end = (Calendar) aceMap.get(KEY_ACE_END);
@@ -1469,15 +1479,17 @@ public class DBSSession extends BaseSession {
 
         DBSDocumentState docState = transaction.getStateForUpdate(id);
 
-        Calendar retainUntil = (Calendar) docState.get(KEY_RETAIN_UNTIL);
-        if (retainUntil != null && Calendar.getInstance().before(retainUntil)) {
-            throw new DocumentExistsException("Cannot remove " + id + ", it is under retention / hold");
-        }
-        if (TRUE.equals(docState.get(KEY_HAS_LEGAL_HOLD))) {
-            throw new DocumentExistsException("Cannot remove " + id + ", it is under retention / hold");
-        }
-        if (TRUE.equals(docState.get(KEY_IS_RETENTION_ACTIVE))) {
-            throw new DocumentExistsException("Cannot remove " + id + ", it is under active retention");
+        if (!BaseSession.canDeleteUndeletable(ClientLoginModule.getCurrentPrincipal())) {
+            Calendar retainUntil = (Calendar) docState.get(KEY_RETAIN_UNTIL);
+            if (retainUntil != null && Calendar.getInstance().before(retainUntil)) {
+                throw new DocumentExistsException("Cannot remove " + id + ", it is under retention / hold");
+            }
+            if (TRUE.equals(docState.get(KEY_HAS_LEGAL_HOLD))) {
+                throw new DocumentExistsException("Cannot remove " + id + ", it is under retention / hold");
+            }
+            if (TRUE.equals(docState.get(KEY_IS_RETENTION_ACTIVE))) {
+                throw new DocumentExistsException("Cannot remove " + id + ", it is under active retention");
+            }
         }
 
         // notify blob manager before removal

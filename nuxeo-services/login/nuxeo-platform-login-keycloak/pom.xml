@@ -3,7 +3,7 @@
   <parent>
     <groupId>org.nuxeo.ecm.login</groupId>
     <artifactId>nuxeo-platform-login-parent</artifactId>
-    <version>10.10-HF50-SNAPSHOT</version>
+    <version>10.10-HF74-SNAPSHOT</version>
   </parent>
   <groupId>org.nuxeo.ecm.platform</groupId>
   <artifactId>nuxeo-platform-login-keycloak</artifactId>
@@ -98,10 +98,6 @@
     <dependency>
       <groupId>org.apache.commons</groupId>
       <artifactId>commons-lang3</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>org.codehaus.jackson</groupId>
-      <artifactId>jackson-mapper-asl</artifactId>
     </dependency>
     <dependency>
       <groupId>org.nuxeo.ecm.core</groupId>

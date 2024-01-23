@@ -1,0 +1,61 @@
+version: 2
+updates:
+  # Default branch: 10.10
+  - package-ecosystem: "maven"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    # Disable version updates, we only want security updates on this maintenance branch
+    open-pull-requests-limit: 0
+    ignore:
+      # Major security updates
+      - dependency-name: "org.jboss.remoting:jboss-remoting"
+        versions: ["[3.0,)"]
+      - dependency-name: "org.hibernate*:*"
+        versions: ["[4.0,)"]
+      - dependency-name: "com.h2database:h2"
+        versions: ["[2.0,)"]
+
+      # Major or minor security updates breaking compilation
+      - dependency-name: "commons-io:commons-io"
+        versions: ["[2.7,)"]
+      - dependency-name: "com.fasterxml.jackson.core:jackson-databind"
+        versions: ["[2.10,)"]
+      - dependency-name: "com.google.code.gson:gson"
+        versions: ["[2.3,)"]
+
+      # Minor security update for Elasticsearch
+      - dependency-name: "org.elasticsearch*:*"
+        versions: [">6.5.3"]
+
+      # Security updates for Chronicle Queue
+      - dependency-name: "net.openhft:chronicle-bom"
+        versions: [">2.17.92"]
+
+  # Ignore pip dependencies
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    ignore:
+      - dependency-name: "*"
+
+  # Ignore npm dependencies
+  - package-ecosystem: "npm"
+    directory: "/nuxeo-dm/nuxeo-platform-webapp"
+    schedule:
+      interval: "daily"
+    ignore:
+      - dependency-name: "*"
+  - package-ecosystem: "npm"
+    directory: "/nuxeo-features/nuxeo-admin-center/nuxeo-admin-center-analytics"
+    schedule:
+      interval: "daily"
+    ignore:
+      - dependency-name: "*"
+  - package-ecosystem: "npm"
+    directory: "/nuxeo-features/preview/nuxeo-preview-core"
+    schedule:
+      interval: "daily"
+    ignore:
+      - dependency-name: "*"

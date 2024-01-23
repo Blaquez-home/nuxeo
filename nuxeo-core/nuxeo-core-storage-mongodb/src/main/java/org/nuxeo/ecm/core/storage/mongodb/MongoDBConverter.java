@@ -21,11 +21,13 @@ package org.nuxeo.ecm.core.storage.mongodb;
 import static java.lang.Boolean.FALSE;
 import static org.nuxeo.ecm.core.storage.State.NOP;
 import static org.nuxeo.ecm.core.storage.mongodb.MongoDBRepository.MONGODB_EACH;
+import static org.nuxeo.ecm.core.storage.mongodb.MongoDBRepository.MONGODB_EXISTS;
 import static org.nuxeo.ecm.core.storage.mongodb.MongoDBRepository.MONGODB_ID;
 import static org.nuxeo.ecm.core.storage.mongodb.MongoDBRepository.MONGODB_INC;
 import static org.nuxeo.ecm.core.storage.mongodb.MongoDBRepository.MONGODB_PULLALL;
 import static org.nuxeo.ecm.core.storage.mongodb.MongoDBRepository.MONGODB_PUSH;
 import static org.nuxeo.ecm.core.storage.mongodb.MongoDBRepository.MONGODB_SET;
+import static org.nuxeo.ecm.core.storage.mongodb.MongoDBRepository.MONGODB_TYPE;
 import static org.nuxeo.ecm.core.storage.mongodb.MongoDBRepository.MONGODB_UNSET;
 import static org.nuxeo.ecm.core.storage.mongodb.MongoDBRepository.ONE;
 
@@ -71,6 +73,8 @@ public class MongoDBConverter {
     /** The keys whose values are ids and are stored as longs. */
     protected final Set<String> idValuesKeys;
 
+    protected boolean serverVersionBefore36;
+
     /**
      * Constructor for a converter that does not map the MongoDB native "_id".
      *
@@ -96,12 +100,16 @@ public class MongoDBConverter {
         this.idValuesKeys = idValuesKeys;
     }
 
+    public void setServerVersion(String serverVersion) {
+        serverVersionBefore36 = serverVersion.compareTo("3.6") < 0;
+    }
+
     /**
      * Constructs a list of MongoDB updates from the given {@link StateDiff}.
      * <p>
      * We need a list because some cases need two operations to avoid conflicts.
      */
-    public List<Document> diffToBson(StateDiff diff) {
+    public ConditionsAndUpdates diffToBson(StateDiff diff) {
         UpdateBuilder updateBuilder = new UpdateBuilder();
         return updateBuilder.build(diff);
     }
@@ -250,6 +258,10 @@ public class MongoDBConverter {
         if (valueIsId(key)) {
             return bsonToId(val);
         }
+        // NXP-31148: numbers is sometime returned as Integer whereas we only deal Long
+        if (val instanceof Integer) {
+            return ((Integer) val).longValue();
+        }
         return (Serializable) val;
     }
 
@@ -259,6 +271,10 @@ public class MongoDBConverter {
         }
         if (valueIsId(key)) {
             return String.class;
+        }
+        // NXP-31148: numbers is sometime returned as Integer whereas we only deal Long
+        if (Integer.class.isAssignableFrom(klass)) {
+            return Long.class;
         }
         return klass;
     }
@@ -299,6 +315,13 @@ public class MongoDBConverter {
         }
     }
 
+    public static class ConditionsAndUpdates {
+
+        public Document conditions = new Document();
+
+        public List<Document> updates = new ArrayList<>();
+    }
+
     /**
      * Update list builder to prevent several updates of the same field.
      * <p>
@@ -320,7 +343,7 @@ public class MongoDBConverter {
 
         protected final Document inc = new Document();
 
-        protected final List<Document> updates = new ArrayList<>(10);
+        protected final ConditionsAndUpdates conditionsAndUpdates = new ConditionsAndUpdates();
 
         protected Document update;
 
@@ -328,7 +351,7 @@ public class MongoDBConverter {
 
         protected Set<String> keys;
 
-        public List<Document> build(StateDiff diff) {
+        public ConditionsAndUpdates build(StateDiff diff) {
             processStateDiff(diff, null);
             newUpdate();
             for (Entry<String, Object> en : set.entrySet()) {
@@ -346,7 +369,7 @@ public class MongoDBConverter {
             for (Entry<String, Object> en : inc.entrySet()) {
                 update(MONGODB_INC, en.getKey(), en.getValue());
             }
-            return updates;
+            return conditionsAndUpdates;
         }
 
         protected void processStateDiff(StateDiff diff, String prefix) {
@@ -369,7 +392,7 @@ public class MongoDBConverter {
 
         protected void processListDiff(ListDiff listDiff, String prefix) {
             if (listDiff.diff != null) {
-                String elemPrefix = prefix == null ? "" : prefix + '.';
+                String elemPrefix = prefix + '.';
                 int i = 0;
                 for (Object value : listDiff.diff) {
                     String name = elemPrefix + i;
@@ -381,6 +404,19 @@ public class MongoDBConverter {
                     }
                     i++;
                 }
+                // in order to protect against concurrent deletions of the array
+                // which would make an update on foo.0.bar create a sub-document
+                // instead of addressing the array element foo.0,
+                // we add a condition on the type of what we're updating
+                Document condition;
+                if (serverVersionBefore36) {
+                    // before 3.6 {$type: "array"} doesn't do what we want,
+                    // so we use a simple existence check which is good enough
+                    condition = new Document(MONGODB_EXISTS, ONE);
+                } else {
+                    condition = new Document(MONGODB_TYPE, "array");
+                }
+                conditionsAndUpdates.conditions.put(prefix, condition);
             }
             if (listDiff.rpush != null) {
                 Object pushed;
@@ -416,7 +452,7 @@ public class MongoDBConverter {
         }
 
         protected void newUpdate() {
-            updates.add(update = new Document());
+            conditionsAndUpdates.updates.add(update = new Document());
             prefixKeys = new HashSet<>();
             keys = new HashSet<>();
         }

@@ -19,7 +19,6 @@
 
 package org.nuxeo.runtime.transaction;
 
-import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -43,6 +42,7 @@ import javax.transaction.Transaction;
 import javax.transaction.TransactionManager;
 import javax.transaction.TransactionSynchronizationRegistry;
 import javax.transaction.UserTransaction;
+import org.apache.geronimo.transaction.manager.TransactionImpl;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -55,17 +55,6 @@ public class TransactionHelper {
 
     private static final Log log = LogFactory.getLog(TransactionHelper.class);
 
-    private static final Field GERONIMO_TRANSACTION_TIMEOUT_FIELD;
-    static {
-        try {
-            GERONIMO_TRANSACTION_TIMEOUT_FIELD = org.apache.geronimo.transaction.manager.TransactionImpl.class.getDeclaredField(
-                    "timeout");
-            GERONIMO_TRANSACTION_TIMEOUT_FIELD.setAccessible(true);
-        } catch (NoSuchFieldException | SecurityException e) {
-            throw new ExceptionInInitializerError(e);
-        }
-    }
-
     /**
      * Thread pool used to execute code in a separate transactional context.
      *
@@ -77,6 +66,27 @@ public class TransactionHelper {
 
     private TransactionHelper() {
         // utility class
+    }
+
+    // @since 10.10-HF63
+    protected static class GeronimoTransactionInfo {
+        protected final long startTransactionTimestamp;
+
+        protected final long timeoutTimestamp;
+
+        protected final long timeoutDurationSecond;
+
+        public GeronimoTransactionInfo(long start, long stop, long timeout) {
+            startTransactionTimestamp = start;
+            timeoutTimestamp = stop;
+            timeoutDurationSecond = timeout;
+        }
+
+        @Override
+        public String toString() {
+            return String.format("Tx started: %d, timeout: %d (duration %ds), current: %d", startTransactionTimestamp,
+                    timeoutTimestamp, timeoutDurationSecond, System.currentTimeMillis());
+        }
     }
 
     /**
@@ -201,24 +211,33 @@ public class TransactionHelper {
      * @since 7.1
      */
     public static boolean isTransactionTimedOut() {
+        GeronimoTransactionInfo txInfo = getGeronimoTransactionInfo();
+        if (txInfo == null) {
+            return false;
+        }
+        return System.currentTimeMillis() > txInfo.timeoutTimestamp;
+    }
+
+    protected static GeronimoTransactionInfo getGeronimoTransactionInfo() {
         TransactionManager tm = NuxeoContainer.getTransactionManager();
         if (tm == null) {
-            return false;
+            return null;
         }
         try {
             Transaction tx = tm.getTransaction();
             if (tx == null || tx.getStatus() != Status.STATUS_ACTIVE) {
-                return false;
+                return null;
             }
-            if (tx instanceof org.apache.geronimo.transaction.manager.TransactionImpl) {
+            if (tx instanceof TransactionImpl) {
                 // Geronimo Transaction Manager
-                Long timeout = (Long) GERONIMO_TRANSACTION_TIMEOUT_FIELD.get(tx);
-                return System.currentTimeMillis() > timeout.longValue();
+                return new GeronimoTransactionInfo(((TransactionImpl) tx).getStartTimestamp(),
+                        ((TransactionImpl) tx).getTimeoutTimestamp(),
+                        ((TransactionImpl) tx).getTimeoutDurationMillis() / 1000);
             } else {
                 // unknown transaction manager
-                return false;
+                return null;
             }
-        } catch (SystemException | ReflectiveOperationException e) {
+        } catch (SystemException e) {
             throw new RuntimeException(e);
         }
     }
@@ -231,25 +250,12 @@ public class TransactionHelper {
      * @since 11.5
      */
     public static int getTransactionTimeToLive() {
-        TransactionManager tm = NuxeoContainer.getTransactionManager();
-        if (tm == null) {
+        GeronimoTransactionInfo txInfo = getGeronimoTransactionInfo();
+        if (txInfo == null) {
             return -1;
         }
-        try {
-            Transaction tx = tm.getTransaction();
-            if (!(tx instanceof org.apache.geronimo.transaction.manager.TransactionImpl)) {
-                // Only geronimo manager is handled
-                return -1;
-            }
-            int status = tx.getStatus();
-            if (status != Status.STATUS_ACTIVE && status != Status.STATUS_MARKED_ROLLBACK) {
-                return -1;
-            }
-            long ttl = ((Long) GERONIMO_TRANSACTION_TIMEOUT_FIELD.get(tx) - System.currentTimeMillis()) / 1000;
-            return ttl > 0 ? Math.toIntExact(ttl) : 0;
-        } catch (SystemException | ReflectiveOperationException e) {
-            throw new RuntimeException(e);
-        }
+        long ttl = (txInfo.timeoutTimestamp - System.currentTimeMillis()) / 1000;
+        return ttl > 0 ? Math.toIntExact(ttl) : 0;
     }
 
     /**
@@ -263,7 +269,8 @@ public class TransactionHelper {
      */
     public static void checkTransactionTimeout() throws TransactionRuntimeException {
         if (isTransactionTimedOut()) {
-            throw new TransactionRuntimeException("Transaction has timed out");
+            GeronimoTransactionInfo txInfo = getGeronimoTransactionInfo();
+            throw new TransactionRuntimeException("Transaction has timed out: " + txInfo);
         }
     }
 
@@ -423,20 +430,19 @@ public class TransactionHelper {
                 } catch (RollbackException | HeuristicRollbackException | HeuristicMixedException e) {
                     String msg = "Unable to commit";
                     // messages from org.apache.geronimo.transaction.manager.TransactionImpl.commit
-                    switch (e.getMessage()) {
-                    case "Unable to commit: transaction marked for rollback":
+                    String message = e.getMessage();
+                    if ("Unable to commit: transaction marked for rollback".equals(message)) {
                         // don't log as error, this happens if there's a ConcurrentUpdateException
                         // at transaction end inside VCS
                         isRollbackDuringCommit = true;
                         // $FALL-THROUGH$
-                    case "Unable to commit: Transaction timeout":
+                    } else if (message != null && message.startsWith("Unable to commit: Transaction timeout")) {
                         // don't log either
                         log.debug(msg, e);
-                        break;
-                    default:
+                    } else {
                         log.error(msg, e);
                     }
-                    throw new TransactionRuntimeException(e.getMessage(), e);
+                    throw new TransactionRuntimeException(message, e);
                 }
             } else if (status == Status.STATUS_MARKED_ROLLBACK) {
                 if (log.isDebugEnabled()) {
@@ -613,7 +619,19 @@ public class TransactionHelper {
      * @since 8.4
      */
     public static void runInTransaction(Runnable runnable) {
-        runInTransaction(() -> {runnable.run(); return null;});
+        runInTransaction(0, runnable);
+    }
+
+    /**
+     * Runs the given {@link Runnable} in a transactional context. Will not start a new transaction if one already
+     * exists.
+     *
+     * @param timeout the timeout in seconds, &lt;= 0 for the default
+     * @param runnable the {@link Runnable}
+     * @since 11.5
+     */
+    public static void runInTransaction(int timeout, Runnable runnable) {
+        runInTransaction(timeout, () -> {runnable.run(); return null;});
     }
 
     /**
@@ -625,9 +643,22 @@ public class TransactionHelper {
      * @since 8.4
      */
     public static <R> R runInTransaction(Supplier<R> supplier) {
+        return runInTransaction(0, supplier);
+    }
+
+    /**
+     * Calls the given {@link Supplier} in a transactional context. Will not start a new transaction if one already
+     * exists.
+     *
+     * @param timeout the timeout in seconds, &lt;= 0 for the default
+     * @param supplier the {@link Supplier}
+     * @return the supplier's result
+     * @since 11.5
+     */
+    public static <R> R runInTransaction(int timeout, Supplier<R> supplier) {
         boolean startTransaction = !isTransactionActiveOrMarkedRollback();
         if (startTransaction) {
-            if (!startTransaction()) {
+            if (!startTransaction(timeout)) {
                 throw new TransactionRuntimeException("Cannot start transaction");
             }
         }

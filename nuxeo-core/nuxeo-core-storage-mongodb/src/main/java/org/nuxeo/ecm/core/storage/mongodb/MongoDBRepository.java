@@ -88,10 +88,12 @@ import org.nuxeo.ecm.core.storage.dbs.DBSExpressionEvaluator;
 import org.nuxeo.ecm.core.storage.dbs.DBSRepositoryBase;
 import org.nuxeo.ecm.core.storage.dbs.DBSSession;
 import org.nuxeo.ecm.core.storage.dbs.DBSStateFlattener;
-import org.nuxeo.ecm.core.storage.dbs.DBSTransactionState.ChangeTokenUpdater;
+import org.nuxeo.ecm.core.storage.dbs.DBSTransactionState.ConditionalUpdates;
+import org.nuxeo.ecm.core.storage.mongodb.MongoDBConverter.ConditionsAndUpdates;
 import org.nuxeo.runtime.api.Framework;
 import org.nuxeo.runtime.mongodb.MongoDBComponent.MongoDBCountHelper;
 import org.nuxeo.runtime.mongodb.MongoDBConnectionService;
+import org.nuxeo.runtime.services.config.ConfigurationService;
 import org.nuxeo.runtime.transaction.TransactionHelper;
 
 import com.mongodb.DuplicateKeyException;
@@ -161,6 +163,10 @@ public class MongoDBRepository extends DBSRepositoryBase {
 
     public static final String MONGODB_META = "$meta";
 
+    public static final String MONGODB_TYPE = "$type";
+
+    public static final String MONGODB_EXISTS = "$exists";
+
     public static final String MONGODB_TEXT_SCORE = "textScore";
 
     private static final String FULLTEXT_INDEX_NAME = "fulltext";
@@ -199,6 +205,9 @@ public class MongoDBRepository extends DBSRepositoryBase {
      * The value is {@code true} on new or migrated repositories.
      */
     protected static final String SETTING_DENORMALIZED_BLOB_KEYS = "denormalizedBlobKeys";
+
+    /** @since 2021.14 */
+    protected static final String GC_NO_CURSOR_TIMEOUT = "nuxeo.mongodb.gc.noCursorTimeout";
 
     /** The key to use to store the id in the database. */
     protected String idKey;
@@ -242,6 +251,8 @@ public class MongoDBRepository extends DBSRepositoryBase {
         coll = database.getCollection(descriptor.name);
         countersColl = database.getCollection(descriptor.name + ".counters");
         settingsColl = database.getCollection(descriptor.name + ".settings");
+        Document buildInfo = database.runCommand(new Document("buildInfo", ONE));
+        String serverVersion = buildInfo.getString("version");
         Duration maxTime = mongoService.getConfig(databaseID).maxTime;
         if (maxTime == null) {
             maxTime = MAX_TIME_DEFAULT;
@@ -270,6 +281,7 @@ public class MongoDBRepository extends DBSRepositoryBase {
             idValuesKeys = Collections.emptySet();
         }
         converter = new MongoDBConverter(useCustomId ? null : KEY_ID, DBSSession.TRUE_OR_NULL_BOOLEAN_KEYS, idValuesKeys);
+        converter.setServerVersion(serverVersion);
         cursorService = new CursorService<>(ob -> (String) converter.getFromBson(ob, idKey, KEY_ID));
         initRepository(descriptor);
     }
@@ -318,7 +330,8 @@ public class MongoDBRepository extends DBSRepositoryBase {
         coll.createIndex(Indexes.ascending(KEY_READ_ACL));
         IndexOptions parentNameIndexOptions = new IndexOptions();
         if (descriptor != null) {
-            parentNameIndexOptions.unique(Boolean.TRUE.equals(descriptor.getChildNameUniqueConstraintEnabled()));
+            parentNameIndexOptions.unique(Boolean.TRUE.equals(descriptor.getChildNameUniqueConstraintEnabled()))
+                                  .partialFilterExpression(Filters.exists(KEY_PARENT_ID));
         }
         coll.createIndex(Indexes.ascending(KEY_PARENT_ID, KEY_NAME), parentNameIndexOptions);
         // often used in user-generated queries
@@ -340,7 +353,7 @@ public class MongoDBRepository extends DBSRepositoryBase {
         coll.createIndex(Indexes.ascending("drv:subscriptions.enabled"));
         coll.createIndex(Indexes.ascending("collection:documentIds"));
         coll.createIndex(Indexes.ascending("collectionMember:collectionIds"));
-        coll.createIndex(Indexes.ascending("nxtag:tags"));
+        coll.createIndex(Indexes.ascending("nxtag:tags.label"));
         // TODO remove it when PropertyCommentManager will be removed
         coll.createIndex(Indexes.ascending("comment:parentId"));
         coll.createIndex(Indexes.ascending("annotation:xpath"));
@@ -586,31 +599,27 @@ public class MongoDBRepository extends DBSRepositoryBase {
     }
 
     @Override
-    public void updateState(String id, StateDiff diff, ChangeTokenUpdater changeTokenUpdater) {
-        List<Document> updates = converter.diffToBson(diff);
-        for (Document update : updates) {
-            Document filter = new Document();
+    public void updateState(String id, StateDiff diff, ConditionalUpdates conditionalUpdates) {
+        ConditionsAndUpdates conditionsAndUpdates = converter.diffToBson(diff);
+        for (Document update : conditionsAndUpdates.updates) {
+            Document filter = new Document(conditionsAndUpdates.conditions);
             converter.putToBson(filter, KEY_ID, id);
-            if (changeTokenUpdater == null) {
+            if (conditionalUpdates != null) {
+                // assume bson is identical to dbs internals
+                // condition works even if value is null
+                filter.putAll(conditionalUpdates.getConditions());
+                Document set = (Document) update.computeIfAbsent(MONGODB_SET, k -> new Document());
+                set.putAll(conditionalUpdates.getUpdates());
+                conditionalUpdates.finish();
+            }
+            if (filter.size() == 1) {
                 if (log.isTraceEnabled()) {
                     log.trace("MongoDB: UPDATE " + id + ": " + update);
                 }
             } else {
-                // assume bson is identical to dbs internals
-                // condition works even if value is null
-                Map<String, Serializable> conditions = changeTokenUpdater.getConditions();
-                Map<String, Serializable> tokenUpdates = changeTokenUpdater.getUpdates();
-                if (update.containsKey(MONGODB_SET)) {
-                    ((Document) update.get(MONGODB_SET)).putAll(tokenUpdates);
-                } else {
-                    Document set = new Document();
-                    set.putAll(tokenUpdates);
-                    update.put(MONGODB_SET, set);
-                }
                 if (log.isTraceEnabled()) {
-                    log.trace("MongoDB: UPDATE " + id + ": IF " + conditions + " THEN " + update);
+                    log.trace("MongoDB: UPDATE " + id + ": IF " + filter + " THEN " + update);
                 }
-                filter.putAll(conditions);
             }
             try {
                 UpdateResult w = coll.updateMany(filter, update);
@@ -936,7 +945,7 @@ public class MongoDBRepository extends DBSRepositoryBase {
             } else if (manualProjection) {
                 totalSize = -1; // unknown due to manual projection
             } else {
-                totalSize = countDocuments(filter);
+                totalSize = countDocuments(filter); // will return -2 if time out during count (e.g. too many results)
             }
         } else if (countUpTo == 0) {
             // no count
@@ -949,6 +958,7 @@ public class MongoDBRepository extends DBSRepositoryBase {
                 totalSize = -1; // unknown due to manual projection
             } else {
                 totalSize = countDocuments(filter, new CountOptions().limit(countUpTo + 1));
+                // will return -2 if time out during count (e.g. too many results)
             }
             if (totalSize > countUpTo) {
                 totalSize = -2; // truncated
@@ -1043,10 +1053,11 @@ public class MongoDBRepository extends DBSRepositoryBase {
             projection = binaryKeys;
             markReferencedBinaries = doc -> markReferencedBinaries(doc, blobManager);
         }
+        boolean noCursorTimeout = Framework.getService(ConfigurationService.class).isBooleanTrue(GC_NO_CURSOR_TIMEOUT);
         if (log.isTraceEnabled()) {
             logQuery(filter, projection);
         }
-        coll.find(filter).projection(projection).forEach(markReferencedBinaries);
+        coll.find(filter).noCursorTimeout(noCursorTimeout).projection(projection).forEach(markReferencedBinaries);
     }
 
     protected void markReferencedBinariesDenormalized(Document ob, DocumentBlobManager blobManager) {
@@ -1225,8 +1236,15 @@ public class MongoDBRepository extends DBSRepositoryBase {
 
     protected long getMaxTimeMs() {
         long ttl = TransactionHelper.getTransactionTimeToLive();
-        // add some extra millis because 0 maxTime is not taken in account
-        return ttl < 0 ? maxTimeMS : ttl * 1000 + 250;
+        if (ttl < 0) {
+            return maxTimeMS;
+        }
+        if (ttl >= 2) {
+            // try to keep a margin to avoid transaction timeout
+            return (ttl - 1) * 1000;
+        }
+        // returns at least 100ms (0 maxTime means no limit)
+        return Math.max((ttl * 1000) - 100, 100);
     }
 
     protected long countDocuments(Bson filter) {
@@ -1234,8 +1252,15 @@ public class MongoDBRepository extends DBSRepositoryBase {
     }
 
     protected long countDocuments(Bson filter, CountOptions options) {
-        options.maxTime(getMaxTimeMs(), MILLISECONDS);
-        return MongoDBCountHelper.countDocuments(databaseID, coll, filter, options);
+        long maxTime = getMaxTimeMs();
+        options.maxTime(maxTime, MILLISECONDS);
+        try {
+            return MongoDBCountHelper.countDocuments(databaseID, coll, filter, options);
+        } catch (MongoExecutionTimeoutException | MongoSocketReadTimeoutException e) {
+            log.warn(String.format("MongoDB timed out, maxTime=%dms, when computing total count with filters %s",
+                    maxTime, filter.toString()));
+            return -2;
+        }
     }
 
 }

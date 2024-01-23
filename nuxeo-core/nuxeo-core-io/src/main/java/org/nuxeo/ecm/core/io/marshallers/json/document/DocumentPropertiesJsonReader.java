@@ -18,6 +18,8 @@
  */
 package org.nuxeo.ecm.core.io.marshallers.json.document;
 
+import static javax.servlet.http.HttpServletResponse.SC_BAD_REQUEST;
+import static org.apache.commons.lang3.StringUtils.isEmpty;
 import static org.nuxeo.ecm.core.io.registry.reflect.Instantiations.SINGLETON;
 import static org.nuxeo.ecm.core.io.registry.reflect.Priorities.REFERENCE;
 
@@ -28,6 +30,7 @@ import java.util.Calendar;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map.Entry;
+import java.util.function.Function;
 
 import javax.inject.Inject;
 
@@ -148,7 +151,10 @@ public class DocumentPropertiesJsonReader extends AbstractJsonReader<List<Proper
                 fillComplexProperty(property, jn);
             } else {
                 Blob blob = readEntity(Blob.class, Blob.class, jn);
-                property.setValue(blob);
+                if (blob != null) {
+                    // ignore null Blob here as the JSON value was not explicitly set to null
+                    property.setValue(blob);
+                }
             }
         }
         property.setForceDirty(false);
@@ -156,7 +162,10 @@ public class DocumentPropertiesJsonReader extends AbstractJsonReader<List<Proper
     }
 
     private void fillScalarProperty(Property property, JsonNode jn) throws IOException {
-        if ((property instanceof ArrayProperty) && jn.isArray()) {
+        if ((property instanceof ArrayProperty)) {
+            if (!jn.isArray()) {
+                throw newUnableToDeserializeException(property);
+            }
             List<Object> values = new ArrayList<>();
             Iterator<JsonNode> it = jn.elements();
             JsonNode item;
@@ -178,11 +187,18 @@ public class DocumentPropertiesJsonReader extends AbstractJsonReader<List<Proper
         } else if (type instanceof BooleanType) {
             return values.toArray((T[]) Array.newInstance(Boolean.class, values.size()));
         } else if (type instanceof LongType) {
+            if (!values.isEmpty() && values.get(0) instanceof Integer) {
+                return values.toArray((T[]) Array.newInstance(Integer.class, values.size()));
+            }
             return values.toArray((T[]) Array.newInstance(Long.class, values.size()));
         } else if (type instanceof DoubleType) {
+            if (!values.isEmpty() && values.get(0) instanceof Integer) {
+                return values.toArray((T[]) Array.newInstance(Integer.class, values.size()));
+            }
+            if (!values.isEmpty() && values.get(0) instanceof Long) {
+                return values.toArray((T[]) Array.newInstance(Long.class, values.size()));
+            }
             return values.toArray((T[]) Array.newInstance(Double.class, values.size()));
-        } else if (type instanceof IntegerType) {
-            return values.toArray((T[]) Array.newInstance(Integer.class, values.size()));
         } else if (type instanceof BinaryType) {
             return values.toArray((T[]) Array.newInstance(Byte.class, values.size()));
         } else if (type instanceof DateType) {
@@ -207,7 +223,7 @@ public class DocumentPropertiesJsonReader extends AbstractJsonReader<List<Proper
                         return blob.getString();
                     }
                 }
-                throw new MarshallingException("Unable to parse the property " +  property.getXPath());
+                throw newUnableToDeserializeException(property);
             }
             Object object = null;
             for (Class<?> clazz : resolver.getManagedClasses()) {
@@ -221,37 +237,96 @@ public class DocumentPropertiesJsonReader extends AbstractJsonReader<List<Proper
                 }
             }
             if (object == null) {
-                throw new MarshallingException("Unable to parse the property " + property.getXPath());
+                throw newUnableToDeserializeException(property);
             }
             value = resolver.getReference(object);
             if (value == null) {
-                throw new MarshallingException("Property " + property.getXPath()
-                        + " value cannot be resolved by the matching resolver " + resolver.getName());
+                throw new MarshallingException("Property: " + property.getXPath()
+                        + " value cannot be resolved by the matching resolver: " + resolver.getName(), SC_BAD_REQUEST);
             }
+        } else if (jn.isArray()) {
+            throw newUnableToDeserializeException(property);
         } else {
-            value = getPropertyValue(((SimpleType) type).getPrimitiveType(), jn);
+            value = getPropertyValue(property, jn, ((SimpleType) type).getPrimitiveType());
         }
         return value;
     }
 
-    private Object getPropertyValue(Type type, JsonNode jn) throws IOException {
+    private Object getPropertyValue(Property property, JsonNode jn, SimpleType type) throws IOException {
         Object value;
         if (jn.isNull()) {
             value = null;
-        } else if (type instanceof BooleanType) {
-            value = jn.asBoolean();
-        } else if (type instanceof LongType) {
-            value = jn.asLong();
-        } else if (type instanceof DoubleType) {
-            value = jn.asDouble();
-        } else if (type instanceof IntegerType) {
-            value = jn.asInt();
-        } else if (type instanceof BinaryType) {
+        } else if (jn.isBoolean()) {
+            if (type instanceof BooleanType) {
+                value = jn.asBoolean();
+            } else if (type instanceof StringType) {
+                value = jn.asText();
+            } else {
+                throw newUnableToDeserializeException(property);
+            }
+        } else if (jn.isLong()) {
+            if (type instanceof LongType || type instanceof DoubleType) {
+                value = jn.asLong();
+            } else if (type instanceof BooleanType) {
+                value = jn.asBoolean(); // 0 to false, everything else to true
+            } else if (type instanceof StringType) {
+                value = jn.asText();
+            } else {
+                throw newUnableToDeserializeException(property);
+            }
+        } else if (jn.isDouble()) {
+            if (type instanceof DoubleType) {
+                value = jn.asDouble();
+            } else if (type instanceof StringType) {
+                value = jn.asText();
+            } else {
+                throw newUnableToDeserializeException(property);
+            }
+        } else if (jn.isInt()) {
+            if (type instanceof LongType || type instanceof IntegerType || type instanceof DoubleType) {
+                value = jn.asInt();
+            } else if (type instanceof BooleanType) {
+                value = jn.asBoolean(); // 0 to false, everything else to true
+            } else if (type instanceof StringType) {
+                value = jn.asText();
+            } else {
+                throw newUnableToDeserializeException(property);
+            }
+        } else if (jn.isBinary() && type instanceof BinaryType) {
             value = jn.binaryValue();
+        } else if (jn.isTextual()) {
+            if (type instanceof BooleanType) {
+                value = tryParse(Boolean::parseBoolean, jn.asText(), property);
+            } else if (type instanceof LongType) {
+                value = tryParse(Long::parseLong, jn.asText(), property);
+            } else if (type instanceof DoubleType) {
+                value = tryParse(Double::parseDouble, jn.asText(), property);
+            } else if (type instanceof IntegerType) {
+                value = tryParse(Integer::parseInt, jn.asText(), property);
+            } else if (type instanceof BinaryType) {
+                value = jn.binaryValue();
+            } else if (type instanceof StringType) {
+                value = jn.asText();
+            } else if (type instanceof DateType) {
+                value = tryParse(type::decode, jn.asText(), property);
+            } else {
+                throw newUnableToDeserializeException(property);
+            }
         } else {
-            value = type.decode(jn.asText());
+            throw newUnableToDeserializeException(property);
         }
         return value;
+    }
+
+    private Object tryParse(Function<String, Object> parser, String value, Property property) {
+        if (isEmpty(value)) {
+            return null;
+        }
+        try {
+            return parser.apply(value);
+        } catch (IllegalArgumentException e) {
+            throw newUnableToDeserializeException(property, e);
+        }
     }
 
     private void fillListProperty(Property property, JsonNode jn) throws IOException {
@@ -272,6 +347,9 @@ public class DocumentPropertiesJsonReader extends AbstractJsonReader<List<Proper
     }
 
     private void fillComplexProperty(Property property, JsonNode jn) throws IOException {
+        if (!jn.isObject()) {
+            throw newUnableToDeserializeException(property);
+        }
         Entry<String, JsonNode> elNode;
         Iterator<Entry<String, JsonNode>> it = jn.fields();
         ComplexProperty complexProperty = (ComplexProperty) property;
@@ -287,4 +365,12 @@ public class DocumentPropertiesJsonReader extends AbstractJsonReader<List<Proper
         }
     }
 
+    private MarshallingException newUnableToDeserializeException(Property property) {
+        return newUnableToDeserializeException(property, null);
+    }
+
+    private MarshallingException newUnableToDeserializeException(Property property, Throwable cause) {
+        return new MarshallingException("Unable to deserialize property: " + property.getXPath(), cause,
+                SC_BAD_REQUEST);
+    }
 }

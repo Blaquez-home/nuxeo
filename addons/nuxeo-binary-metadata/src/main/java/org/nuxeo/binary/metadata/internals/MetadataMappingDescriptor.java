@@ -15,6 +15,7 @@
  *
  * Contributors:
  *      Vladimir Pasquier <vpasquier@nuxeo.com>
+ *      Thibaud Arguillere
  */
 package org.nuxeo.binary.metadata.internals;
 
@@ -44,7 +45,11 @@ public class MetadataMappingDescriptor implements Serializable {
     protected String blobXPath;
 
     @XNode("@ignorePrefix")
-    protected Boolean ignorePrefix = true;
+    protected Boolean ignorePrefix;
+
+    /** @since 11.1 */
+    @XNode("@readOnly")
+    protected Boolean readOnly;
 
     @XNodeList(value = "metadata", componentType = MetadataDescriptor.class, type = ArrayList.class)
     protected List<MetadataDescriptor> metadataDescriptors;
@@ -86,7 +91,25 @@ public class MetadataMappingDescriptor implements Serializable {
         return blobXPath;
     }
 
+    /**
+     * @deprecated since 11.1, use {@link #ignorePrefix()}
+     */
+    @Deprecated
     public Boolean getIgnorePrefix() {
-        return ignorePrefix;
+        return ignorePrefix();
+    }
+
+    public boolean ignorePrefix() {
+    	return !Boolean.FALSE.equals(ignorePrefix);
+    }
+
+    public boolean isReadOnly() {
+    	return Boolean.TRUE.equals(readOnly);
+    }
+
+    @Override
+    public String toString() {
+        return "MetadataMappingDescriptor{id=" + id + ", processor=" + processor + ", blobXPath="
+                + blobXPath  + ", ignorePrefix=" + ignorePrefix + ", readOnly=" + readOnly + '}';
     }
 }

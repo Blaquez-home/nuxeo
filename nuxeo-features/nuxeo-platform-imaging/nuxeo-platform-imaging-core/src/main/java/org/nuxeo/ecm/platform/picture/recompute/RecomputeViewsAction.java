@@ -19,7 +19,7 @@
  */
 package org.nuxeo.ecm.platform.picture.recompute;
 
-import static org.nuxeo.ecm.core.bulk.BulkServiceImpl.STATUS_STREAM;
+import static org.nuxeo.ecm.platform.picture.PictureViewsHelper.NOTHING_TO_PROCESS_MESSAGE;
 import static org.nuxeo.lib.stream.computation.AbstractComputation.INPUT_1;
 import static org.nuxeo.lib.stream.computation.AbstractComputation.OUTPUT_1;
 
@@ -31,6 +31,8 @@ import java.util.Map;
 import org.nuxeo.ecm.core.api.CoreSession;
 import org.nuxeo.ecm.core.api.DocumentModel;
 import org.nuxeo.ecm.core.api.IdRef;
+import org.nuxeo.ecm.core.api.impl.DownloadBlobGuard;
+import org.nuxeo.ecm.core.bulk.BulkServiceImpl;
 import org.nuxeo.ecm.core.bulk.action.computation.AbstractBulkComputation;
 import org.nuxeo.ecm.core.bulk.message.BulkCommand;
 import org.nuxeo.ecm.core.event.Event;
@@ -56,7 +58,7 @@ public class RecomputeViewsAction implements StreamProcessorTopology {
     public Topology getTopology(Map<String, String> options) {
         return Topology.builder()
                 .addComputation(RecomputeViewsComputation::new, //
-                        Arrays.asList(INPUT_1 + ":" + ACTION_NAME, OUTPUT_1 + ":" + STATUS_STREAM))
+                        Arrays.asList(INPUT_1 + ":" + ACTION_NAME, OUTPUT_1 + ":" + BulkServiceImpl.STATUS_STREAM))
                 .build();
     }
 
@@ -70,6 +72,8 @@ public class RecomputeViewsAction implements StreamProcessorTopology {
         protected PictureViewsHelper pictureViewsHelper = new PictureViewsHelper();
 
         protected String xpath;
+
+        protected String lastPictureViewsStatus;
 
         public RecomputeViewsComputation() {
             super(ACTION_NAME);
@@ -86,10 +90,21 @@ public class RecomputeViewsAction implements StreamProcessorTopology {
 
             for (String docId : ids) {
                 pictureViewsHelper.newTransaction();
-                pictureViewsHelper.computePictureViews(session, docId, xpath, s -> {
-                });
-                fireEvent(session, session.getDocument(new IdRef(docId)), PICTURE_VIEWS_GENERATION_DONE_EVENT);
+                pictureViewsHelper.computePictureViews(session, docId, xpath, this::setLastPictureViewsStatus);
+                if (!NOTHING_TO_PROCESS_MESSAGE.equals(getLastPictureViewsStatus())) {
+                    fireEvent(session, session.getDocument(new IdRef(docId)), PICTURE_VIEWS_GENERATION_DONE_EVENT);
+                }
+                // Avoid triggering fulltext extractor on the generated views
+                DownloadBlobGuard.enable();
             }
+        }
+
+        protected void setLastPictureViewsStatus(String status) {
+            lastPictureViewsStatus = status;
+        }
+
+        protected String getLastPictureViewsStatus() {
+            return lastPictureViewsStatus;
         }
 
         /**

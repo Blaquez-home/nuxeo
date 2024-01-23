@@ -231,6 +231,9 @@ public class UserManagerImpl implements UserManager, MultiTenantUserManager, Adm
     public UserManagerImpl() {
         dirService = Framework.getService(DirectoryService.class);
         cacheService = Framework.getService(CacheService.class);
+        if (cacheService == null) {
+            log.warn("User Manager cannot leverage the cache service, performances may be affected, see NXP-29416.");
+        }
         virtualUsers = new HashMap<>();
         userConfig = new UserConfig();
     }
@@ -1389,7 +1392,7 @@ public class UserManagerImpl implements UserManager, MultiTenantUserManager, Adm
         if (passwordProperty.isDirty()) {
             String clearPassword = (String) passwordProperty.getValue();
             if (StringUtils.isNotBlank(clearPassword) && !validatePassword(clearPassword)) {
-                throw new InvalidPasswordException();
+                throw new InvalidPasswordException("The password doesn't meet requirements");
             }
         }
     }

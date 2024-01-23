@@ -24,6 +24,7 @@ import static org.nuxeo.ecm.core.api.security.SecurityConstants.BROWSE;
 import static org.nuxeo.ecm.core.api.security.SecurityConstants.EVERYONE;
 import static org.nuxeo.ecm.core.api.security.SecurityConstants.READ;
 import static org.nuxeo.ecm.core.api.security.SecurityConstants.READ_VERSION;
+import static org.nuxeo.ecm.core.api.security.SecurityConstants.SYSTEM_USERNAME;
 import static org.nuxeo.ecm.core.api.security.SecurityConstants.UNSUPPORTED_ACL;
 import static org.nuxeo.ecm.core.storage.dbs.DBSDocument.INITIAL_CHANGE_TOKEN;
 import static org.nuxeo.ecm.core.storage.dbs.DBSDocument.INITIAL_SYS_CHANGE_TOKEN;
@@ -50,6 +51,7 @@ import static org.nuxeo.ecm.core.storage.dbs.DBSDocument.KEY_PROXY_VERSION_SERIE
 import static org.nuxeo.ecm.core.storage.dbs.DBSDocument.KEY_READ_ACL;
 import static org.nuxeo.ecm.core.storage.dbs.DBSDocument.KEY_SYS_CHANGE_TOKEN;
 import static org.nuxeo.ecm.core.storage.dbs.DBSDocument.KEY_VERSION_SERIES_ID;
+import static org.nuxeo.ecm.core.storage.dbs.action.UpdateReadAclsAction.UPDATE_READ_ACLS_ACTION;
 
 import java.io.Serializable;
 import java.util.ArrayList;
@@ -63,6 +65,7 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Stream;
 
@@ -74,9 +77,12 @@ import org.nuxeo.ecm.core.api.ConcurrentUpdateException;
 import org.nuxeo.ecm.core.api.NuxeoPrincipal;
 import org.nuxeo.ecm.core.api.PartialList;
 import org.nuxeo.ecm.core.api.SystemPrincipal;
+import org.nuxeo.ecm.core.api.impl.DownloadBlobGuard;
 import org.nuxeo.ecm.core.api.model.DeltaLong;
 import org.nuxeo.ecm.core.api.repository.FulltextConfiguration;
 import org.nuxeo.ecm.core.api.repository.RepositoryManager;
+import org.nuxeo.ecm.core.bulk.BulkService;
+import org.nuxeo.ecm.core.bulk.message.BulkCommand;
 import org.nuxeo.ecm.core.model.BaseSession;
 import org.nuxeo.ecm.core.model.BaseSession.VersionAclMode;
 import org.nuxeo.ecm.core.query.QueryFilter;
@@ -125,6 +131,13 @@ public class DBSTransactionState {
     public static final String READ_ACL_ASYNC_THRESHOLD_PROPERTY = "nuxeo.core.readacl.async.threshold";
 
     public static final String READ_ACL_ASYNC_THRESHOLD_DEFAULT = "500";
+
+    /**
+     * Set this property to false to use worker implementation for read acls update.
+     *
+     * @since 10.10-HF57
+     */
+    public static final String UPDATE_READ_ACL_BAF_IMPL_PROPERTY = "nuxeo.core.readacl.impl.baf";
 
     protected final DBSRepository repository;
 
@@ -214,6 +227,15 @@ public class DBSTransactionState {
         }
         // fetch from repository
         return repository.readState(id);
+    }
+
+    /**
+     * Returns whether or not the document with given {@code id} exists in the storage.
+     *
+     * @since 2021.12
+     */
+    public boolean exists(String id) {
+        return repository.queryKeyValuePresence(KEY_ID, id, Collections.emptySet());
     }
 
     /**
@@ -507,12 +529,11 @@ public class DBSTransactionState {
      * Updates the Read ACLs recursively on a document.
      */
     public void updateTreeReadAcls(String id) {
-        // versions too XXX TODO
-
         save(); // flush everything to the database
 
         // update the doc itself
         updateDocumentReadAcls(id);
+        session.getVersionsIds(id).forEach(this::updateDocumentReadAcls);
 
         // check if we have a small enough number of descendants that we can process them synchronously
         int limit = getReadAclsAsyncThreshold();
@@ -520,7 +541,12 @@ public class DBSTransactionState {
         try (Stream<State> states = getDescendants(id, Collections.emptySet(), limit)) {
             states.forEach(state -> ids.add((String) state.get(KEY_ID)));
         }
-        if (limit == 0 || ids.size() < limit) {
+        // Only count versions if we are still under the threshold
+        if (isUnderSyncLimit(limit, ids)) {
+            repository.queryKeyValueWithOperator(KEY_IS_VERSION, true, KEY_VERSION_SERIES_ID, DBSQueryOperator.IN, ids,
+                    new HashSet<>()).forEach(state -> ids.add((String) state.get(KEY_ID)));
+        }
+        if (isUnderSyncLimit(limit, ids)) {
             // update all descendants synchronously
             ids.forEach(this::updateDocumentReadAcls);
         } else {
@@ -537,18 +563,32 @@ public class DBSTransactionState {
                 updateDocumentReadAcls(childId);
             }
 
-            // asynchronous work to do the whole tree
             nxql = String.format("SELECT ecm:uuid FROM Document WHERE ecm:ancestorId = '%s'", id);
-            Work work = new FindReadAclsWork(repository.getName(), nxql, null);
-            Framework.getService(WorkManager.class).schedule(work);
+            if (Framework.isBooleanPropertyFalse(UPDATE_READ_ACL_BAF_IMPL_PROPERTY)) {
+                // asynchronous work to do the whole tree
+                Work work = new FindReadAclsWork(repository.getName(), nxql, null);
+                Framework.getService(WorkManager.class).schedule(work);
+            } else {
+                // bulk action to do the whole tree (default behavior if UPDATE_READ_ACL_BAF_IMPL_PROPERTY unset)
+                BulkService service = Framework.getService(BulkService.class);
+                BulkCommand command = new BulkCommand.Builder(UPDATE_READ_ACLS_ACTION, nxql).user(
+                        SYSTEM_USERNAME).repository(session.getRepositoryName()).build();
+                service.submitTransactional(command);
+            }
         }
+    }
+
+    protected boolean isUnderSyncLimit(int limit, Set<String> ids) {
+        return limit == 0 || ids.size() < limit;
     }
 
     /**
      * Work to find the ids of documents for which Read ACLs must be recomputed, and launch the needed update works.
      *
      * @since 9.10
+     * @deprecated since 2021.11 use {@link UpdateReadAclsAction} instead
      */
+    @Deprecated
     public static class FindReadAclsWork extends BatchFinderWork {
 
         private static final long serialVersionUID = 1L;
@@ -582,7 +622,9 @@ public class DBSTransactionState {
      * Work to update the Read ACLs on a list of documents, without recursion.
      *
      * @since 9.10
+     * @deprecated since 2021.11 use {@link UpdateReadAclsAction} instead
      */
+    @Deprecated
     public static class UpdateReadAclsWork extends BatchProcessorWork {
 
         private static final long serialVersionUID = 1L;
@@ -638,6 +680,9 @@ public class DBSTransactionState {
         // no transient for state read, and we don't want to trash caches
         // fetch from repository only the properties needed for Read ACL computation and recursion
         State state = repository.readPartialState(id, READ_ACL_RECURSION_KEYS);
+        if (state == null) {
+            return;
+        }
         State oldState = new State(1);
         oldState.put(KEY_READ_ACL, state.get(KEY_READ_ACL));
         // compute new value
@@ -836,7 +881,7 @@ public class DBSTransactionState {
                         }
                         // else there's already a create or an update in the undo log so original info is enough
                     }
-                    ChangeTokenUpdater changeTokenUpdater;
+                    ConditionalUpdates conditionalUpdates = null;
                     if (session.changeTokenEnabled) {
                         // increment system change token
                         Long base = (Long) docState.get(KEY_SYS_CHANGE_TOKEN);
@@ -844,14 +889,10 @@ public class DBSTransactionState {
                         diff.put(KEY_SYS_CHANGE_TOKEN, DeltaLong.valueOf(base, 1));
                         // update change token if applicable (user change)
                         if (userChangeIds.contains(id)) {
-                            changeTokenUpdater = new ChangeTokenUpdater(docState);
-                        } else {
-                            changeTokenUpdater = null;
+                            conditionalUpdates = getConditionalUpdateForChangeToken(docState);
                         }
-                    } else {
-                        changeTokenUpdater = null;
                     }
-                    repository.updateState(id, diff, changeTokenUpdater);
+                    repository.updateState(id, diff, conditionalUpdates);
                 } finally {
                     docState.setNotDirty();
                 }
@@ -862,6 +903,36 @@ public class DBSTransactionState {
         scheduleWork(works);
     }
 
+    protected ConditionalUpdates getConditionalUpdateForChangeToken(DBSDocumentState docState) {
+        ConditionalUpdates conditionalUpdates = new ConditionalUpdates();
+        // condition and update
+        Long oldToken = (Long) docState.getOriginalState().get(KEY_CHANGE_TOKEN);
+        Long newToken = updateChangeToken(oldToken);
+        conditionalUpdates.put(Collections.singletonMap(KEY_CHANGE_TOKEN, oldToken),
+                Collections.singletonMap(KEY_CHANGE_TOKEN, newToken));
+        // callback
+        Runnable callback = () -> {
+            // also store the new token in the state (without marking dirty)
+            Long ot = (Long) conditionalUpdates.getUpdates().get(KEY_CHANGE_TOKEN);
+            docState.getState().put(KEY_CHANGE_TOKEN, ot);
+            // new conditional update
+            Long nt = updateChangeToken(ot);
+            conditionalUpdates.put(Collections.singletonMap(KEY_CHANGE_TOKEN, ot),
+                    Collections.singletonMap(KEY_CHANGE_TOKEN, nt));
+        };
+        conditionalUpdates.addCallback(callback);
+        return conditionalUpdates;
+    }
+
+    protected static Long updateChangeToken(Long changeToken) {
+        if (changeToken == null) {
+            // document without change token, just created
+            return INITIAL_CHANGE_TOKEN;
+        } else {
+            return BaseDocument.updateChangeToken(changeToken);
+        }
+    }
+
     /**
      * Logic to get the conditions to use to match and update a change token.
      * <p>
@@ -870,39 +941,51 @@ public class DBSTransactionState {
      *
      * @since 9.1
      */
-    public static class ChangeTokenUpdater {
+    public static class ConditionalUpdates {
 
-        protected final DBSDocumentState docState;
+        protected final Map<String, Serializable> conditions = new HashMap<>();
 
-        protected Long oldToken;
+        protected final Map<String, Serializable> updates = new HashMap<>();
 
-        public ChangeTokenUpdater(DBSDocumentState docState) {
-            this.docState = docState;
-            oldToken = (Long) docState.getOriginalState().get(KEY_CHANGE_TOKEN);
+        protected final List<Runnable> callbacks = new ArrayList<>();
+
+        /**
+         * Puts condition and update.
+         */
+        public void put(Map<String, Serializable> condition, Map<String, Serializable> update) {
+            conditions.putAll(condition);
+            updates.putAll(update);
+        }
+
+        /**
+         * Adds a callback.
+         * <p>
+         * The callback is useful to 1. finish updating internal in-memory document state after an update is done, and
+         * 2. prepare a new condition/update if the conditional update is used again.
+         */
+        public void addCallback(Runnable callback) {
+            callbacks.add(callback);
         }
 
         /**
          * Gets the conditions to use to match a change token.
          */
         public Map<String, Serializable> getConditions() {
-            return Collections.singletonMap(KEY_CHANGE_TOKEN, oldToken);
+            return conditions;
         }
 
         /**
          * Gets the updates to make to write the updated change token.
          */
         public Map<String, Serializable> getUpdates() {
-            Long newToken;
-            if (oldToken == null) {
-                // document without change token, just created
-                newToken = INITIAL_CHANGE_TOKEN;
-            } else {
-                newToken = BaseDocument.updateChangeToken(oldToken);
-            }
-            // also store the new token in the state (without marking dirty), for the next update
-            docState.getState().put(KEY_CHANGE_TOKEN, newToken);
-            oldToken = newToken;
-            return Collections.singletonMap(KEY_CHANGE_TOKEN, newToken);
+            return updates;
+        }
+
+        /**
+         * To be called by the processor after each update.
+         */
+        public void finish() {
+            callbacks.forEach(Runnable::run);
         }
     }
 
@@ -1052,7 +1135,9 @@ public class DBSTransactionState {
             blobKeysArray = blobKeys.toArray();
             Arrays.sort(blobKeysArray);
         }
-        docState.put(KEY_BLOB_KEYS, blobKeysArray);
+        if (!Objects.deepEquals(blobKeysArray, docState.get(KEY_BLOB_KEYS))) {
+            docState.put(KEY_BLOB_KEYS, blobKeysArray);
+        }
     }
 
     /**
@@ -1128,6 +1213,7 @@ public class DBSTransactionState {
         save();
         commitSave();
         repository.commit();
+        DownloadBlobGuard.disable();
     }
 
     /**
@@ -1150,6 +1236,7 @@ public class DBSTransactionState {
         // the transaction ended, the proxied DBSSession will disappear and cannot be reused anyway
         undoLog = null;
         repository.rollback();
+        DownloadBlobGuard.disable();
     }
 
     protected void clearTransient() {
@@ -1181,11 +1268,14 @@ public class DBSTransactionState {
         }
         markIndexingInProgress(dirtyIds);
         List<Work> works = new ArrayList<>(dirtyIds.size());
+        boolean okToDownloadBlob = !DownloadBlobGuard.isEnable();
         for (String id : dirtyIds) {
             boolean updateSimpleText = docsWithDirtyStrings.contains(id);
-            boolean updateBinaryText = docsWithDirtyBinaries.contains(id);
-            Work work = new FulltextExtractorWork(repository.getName(), id, updateSimpleText, updateBinaryText, true);
-            works.add(work);
+            boolean updateBinaryText = okToDownloadBlob && docsWithDirtyBinaries.contains(id);
+            if (updateSimpleText || updateBinaryText) {
+                Work work = new FulltextExtractorWork(repository.getName(), id, updateSimpleText, updateBinaryText, true);
+                works.add(work);
+            }
         }
         return works;
     }

@@ -23,8 +23,10 @@ import static org.nuxeo.ecm.core.io.registry.reflect.Instantiations.SINGLETON;
 import static org.nuxeo.ecm.core.io.registry.reflect.Priorities.REFERENCE;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.List;
 
 import org.nuxeo.ecm.core.api.CoreSession;
 import org.nuxeo.ecm.core.api.DocumentModel;
@@ -74,19 +76,23 @@ public class BasePermissionsJsonEnricher extends AbstractJsonEnricher<DocumentMo
 
     @Override
     public void write(JsonGenerator jg, DocumentModel document) throws IOException {
-        jg.writeArrayFieldStart(NAME);
         try (SessionWrapper wrapper = ctx.getSession(document)) {
+            if (!wrapper.getSession().exists(document.getRef())) {
+                return;
+            }
+            jg.writeArrayFieldStart(NAME);
             for (String permission : getPermissionsInSession(document, wrapper.getSession())) {
                 jg.writeString(permission);
             }
+            jg.writeEndArray();
         }
-        jg.writeEndArray();
     }
 
     private Collection<String> getPermissionsInSession(DocumentModel doc, CoreSession session) {
         PermissionProvider permissionProvider = Framework.getService(PermissionProvider.class);
-        return session.filterGrantedPermissions(session.getPrincipal(), doc.getRef(),
-                Arrays.asList(permissionProvider.getPermissions()));
+        // Convert into real list to avoid UnsupportedOperationException if permissions are added or removed
+        List<String> permissions = new ArrayList<String>(Arrays.asList(permissionProvider.getPermissions()));
+        return session.filterGrantedPermissions(session.getPrincipal(), doc.getRef(), permissions);
     }
 
 }

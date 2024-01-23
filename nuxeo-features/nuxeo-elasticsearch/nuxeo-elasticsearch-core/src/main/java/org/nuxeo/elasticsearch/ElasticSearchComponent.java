@@ -19,6 +19,7 @@
  */
 package org.nuxeo.elasticsearch;
 
+import static org.nuxeo.common.concurrent.ThreadFactories.newThreadFactory;
 import static org.nuxeo.elasticsearch.ElasticSearchConstants.ES_ENABLED_PROPERTY;
 import static org.nuxeo.elasticsearch.ElasticSearchConstants.INDEXING_QUEUE_ID;
 import static org.nuxeo.elasticsearch.ElasticSearchConstants.REINDEX_ON_STARTUP_PROPERTY;
@@ -33,7 +34,6 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
-import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -73,6 +73,7 @@ import org.nuxeo.elasticsearch.work.ScrollingIndexingWorker;
 import org.nuxeo.runtime.api.Framework;
 import org.nuxeo.runtime.model.ComponentContext;
 import org.nuxeo.runtime.model.ComponentInstance;
+import org.nuxeo.runtime.model.ComponentStartOrders;
 import org.nuxeo.runtime.model.DefaultComponent;
 import org.nuxeo.runtime.transaction.TransactionHelper;
 
@@ -233,10 +234,7 @@ public class ElasticSearchComponent extends DefaultComponent
 
     @Override
     public int getApplicationStartedOrder() {
-        RepositoryService component = (RepositoryService) Framework.getRuntime()
-                                                                   .getComponent(
-                                                                           "org.nuxeo.ecm.core.repository.RepositoryServiceComponent");
-        return component.getApplicationStartedOrder() / 2;
+        return ComponentStartOrders.ELASTIC;
     }
 
     void processStackedCommands() {
@@ -271,6 +269,11 @@ public class ElasticSearchComponent extends DefaultComponent
     }
 
     @Override
+    public void initRepositoryIndexWithAliases(String repositoryName) {
+        esa.initRepositoryIndexWithAliases(repositoryName);
+    }
+
+    @Override
     public List<String> getRepositoryNames() {
         return esa.getRepositoryNames();
     }
@@ -298,6 +301,11 @@ public class ElasticSearchComponent extends DefaultComponent
     @Override
     public String getWriteIndexName(String searchIndexName) {
         return esa.getWriteIndexName(searchIndexName);
+    }
+
+    @Override
+    public String getSecondaryWriteIndexName(String searchIndexName) {
+        return esa.getSecondaryWriteIndexName(searchIndexName);
     }
 
     @Override
@@ -355,7 +363,7 @@ public class ElasticSearchComponent extends DefaultComponent
 
     protected void initListenerThreadPool() {
         waiterExecutorService = MoreExecutors.listeningDecorator(
-                Executors.newCachedThreadPool(new NamedThreadFactory()));
+                Executors.newCachedThreadPool(newThreadFactory("waitForEsIndexing")));
     }
 
     protected void shutdownListenerThreadPool() {
@@ -559,16 +567,8 @@ public class ElasticSearchComponent extends DefaultComponent
     }
 
     // misc ====================================================================
-    protected boolean isReady() {
+    public boolean isReady() {
         return (esa != null) && esa.isReady();
-    }
-
-    protected static class NamedThreadFactory implements ThreadFactory {
-        @SuppressWarnings("NullableProblems")
-        @Override
-        public Thread newThread(Runnable r) {
-            return new Thread(r, "waitForEsIndexing");
-        }
     }
 
     @Override

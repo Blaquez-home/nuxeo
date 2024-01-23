@@ -21,10 +21,14 @@ package org.nuxeo.ecm.platform.routing.test;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.nuxeo.ecm.core.api.event.DocumentEventTypes.DOCUMENT_UPDATED;
+import static org.nuxeo.ecm.platform.routing.api.DocumentRoutingConstants.DOCUMENT_ROUTE_DOCUMENT_TYPE;
 import static org.nuxeo.ecm.platform.routing.api.DocumentRoutingConstants.WORKFLOW_FORCE_RESUME;
+import static org.nuxeo.ecm.platform.task.TaskConstants.TASK_PROCESS_ID_PROPERTY_NAME;
+import static org.nuxeo.ecm.platform.task.TaskConstants.TASK_TYPE_NAME;
 
 import java.io.Serializable;
 import java.util.ArrayList;
@@ -38,6 +42,7 @@ import java.util.function.Predicate;
 
 import javax.inject.Inject;
 
+import org.apache.logging.log4j.core.LogEvent;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Ignore;
@@ -59,6 +64,7 @@ import org.nuxeo.ecm.core.event.impl.DocumentEventContext;
 import org.nuxeo.ecm.core.event.test.CapturingEventListener;
 import org.nuxeo.ecm.core.test.CoreFeature;
 import org.nuxeo.ecm.platform.routing.api.DocumentRoute;
+import org.nuxeo.ecm.platform.routing.api.DocumentRoutingConstants;
 import org.nuxeo.ecm.platform.routing.api.DocumentRoutingService;
 import org.nuxeo.ecm.platform.routing.api.exception.DocumentRouteException;
 import org.nuxeo.ecm.platform.routing.api.operation.BulkRestartWorkflow;
@@ -69,10 +75,14 @@ import org.nuxeo.ecm.platform.routing.core.impl.GraphRoute;
 import org.nuxeo.ecm.platform.task.Task;
 import org.nuxeo.ecm.platform.task.TaskService;
 import org.nuxeo.ecm.platform.usermanager.UserManager;
-import org.nuxeo.runtime.test.runner.RuntimeHarness;
 import org.nuxeo.runtime.test.runner.Deploy;
+import org.nuxeo.runtime.test.runner.Features;
+import org.nuxeo.runtime.test.runner.LogCaptureFeature;
+import org.nuxeo.runtime.test.runner.RuntimeHarness;
+import org.nuxeo.runtime.test.runner.WithFrameworkProperty;
 import org.nuxeo.runtime.transaction.TransactionHelper;
 
+@Features(LogCaptureFeature.class)
 public class GraphRouteTest extends AbstractGraphRouteTest {
 
     protected static final String DUMMY_WF_VAR = "dummyWFVar";
@@ -86,6 +96,9 @@ public class GraphRouteTest extends AbstractGraphRouteTest {
 
     @Inject
     protected RuntimeHarness harness;
+
+    @Inject
+    protected LogCaptureFeature.Result logResult;
 
     @Inject
     protected CoreSession session;
@@ -366,12 +379,40 @@ public class GraphRouteTest extends AbstractGraphRouteTest {
         assertEquals(1, cancelledTasks.size());
         DocumentRef routeRef = route.getDocument().getRef();
 
-        routing.cleanupDoneAndCanceledRouteInstances(session.getRepositoryName(), 0);
+        routing.cleanupRouteInstances(session.getRepositoryName());
         session.save();
+        coreFeature.waitForAsyncCompletion();
         assertFalse(session.exists(routeRef));
         for (DocumentModel cancelledTask : cancelledTasks) {
             assertFalse(session.exists(cancelledTask.getRef()));
         }
+    }
+
+    @Test
+    @WithFrameworkProperty(name = "nuxeo.routing.cleanup.workflow.instances.orphan", value = "true")
+    public void testCleanup() {
+        DocumentModel ws = session.createDocumentModel("/", "ws", "Workspace");
+        ws = session.createDocument(ws);
+        DocumentModel route = session.createDocumentModel("/", "dummyRoute", DOCUMENT_ROUTE_DOCUMENT_TYPE);
+        DocumentModel file = session.createDocumentModel("/ws", "file", "File");
+        file = session.createDocument(file);
+        route.setPropertyValue(DocumentRoutingConstants.ATTACHED_DOCUMENTS_PROPERTY_NAME,
+                (Serializable) Arrays.asList(file.getId()));
+        route = session.createDocument(route);
+        DocumentModel task = session.createDocumentModel("/", "dummyTask", TASK_TYPE_NAME);
+        task.setPropertyValue(TASK_PROCESS_ID_PROPERTY_NAME, route.getId());
+        task = session.createDocument(task);
+        session.save();
+        coreFeature.waitForAsyncCompletion();
+
+        assertTrue(session.exists(route.getRef()));
+        assertTrue(session.exists(task.getRef()));
+        session.removeDocument(ws.getRef());
+        coreFeature.waitForAsyncCompletion();
+        routing.cleanupRouteInstances(session.getRepositoryName());
+        coreFeature.waitForAsyncCompletion();
+        assertFalse(session.exists(route.getRef()));
+        assertFalse(session.exists(task.getRef()));
     }
 
     @SuppressWarnings("unchecked")
@@ -982,7 +1023,8 @@ public class GraphRouteTest extends AbstractGraphRouteTest {
             assertEquals("test", route.getDocument().getPropertyValue("fctroute1:globalVariable"));
             doneTasks = session.query("Select * from TaskDoc where ecm:currentLifeCycleState = 'ended'");
             assertEquals(1, doneTasks.size());
-            routing.cleanupDoneAndCanceledRouteInstances(session.getRepositoryName(), 0);
+            routing.cleanupRouteInstances(session.getRepositoryName());
+            coreFeature.waitForAsyncCompletion();
             session.save();
             assertFalse(session.exists(routeRef));
             for (DocumentModel doneTask : doneTasks) {
@@ -1654,6 +1696,37 @@ public class GraphRouteTest extends AbstractGraphRouteTest {
         assertTrue(subr.isCanceled());
     }
 
+    /**
+     * @since 2021.20
+     */
+    @Test
+    public void testParentCancelAfterSubRouteCancel() throws Exception {
+        createRouteAndSuspendingSubRoute();
+
+        // start the main workflow
+        DocumentRoute route = instantiateAndRun(session);
+
+        // check that it's suspended on node 2
+        assertFalse(route.isDone());
+        DocumentModel n2 = session.getChild(route.getDocument().getRef(), "node2");
+        assertNotNull(n2);
+        assertEquals(State.SUSPENDED.getLifeCycleState(), n2.getCurrentLifeCycleState());
+
+        // find the sub-route instance and cancel it
+        String subid = (String) n2.getPropertyValue(GraphNode.PROP_SUB_ROUTE_INSTANCE_ID);
+        assertNotNull(subid);
+        DocumentModel subrdoc = session.getDocument(new IdRef(subid));
+        DocumentRoute subr = subrdoc.getAdapter(DocumentRoute.class);
+        subr.cancel(session);
+        assertTrue(subr.isCanceled());
+
+        // cancel the main workflow
+        assertFalse(route.isCanceled());
+        route.cancel(session);
+        route.getDocument().refresh();
+        assertTrue(route.isCanceled());
+    }
+
     @SuppressWarnings("unchecked")
     @Test
     public void testCancelTasksWhenWorkflowDone() throws Exception {
@@ -2185,6 +2258,7 @@ public class GraphRouteTest extends AbstractGraphRouteTest {
      * @since 10.10
      */
     @Test
+    @LogCaptureFeature.FilterOn(logLevel = "WARN")
     public void testGlobalVariableSecurity() {
         routeDoc.setPropertyValue(GraphRoute.PROP_VARIABLES_FACET, "FacetRoute1");
         routeDoc.addFacet("FacetRoute1");
@@ -2203,12 +2277,18 @@ public class GraphRouteTest extends AbstractGraphRouteTest {
         Map<String, Object> vars = new HashMap<String, Object>();
         vars.put(Constants.VAR_WORKFLOW, m);
         vars.put(Constants.VAR_WORKFLOW_NODE, m);
-        try {
-            node.setAllVariables(vars, false);
-            fail("Global workflow variable assignement must be forbidden.");
-        } catch (DocumentRouteException e) {
-            // Expected
-        }
+
+        List<LogEvent> events = logResult.getCaughtEvents();
+        assertTrue(events.isEmpty());
+        // Setting  global not allowed variable goes through
+        node.setAllVariables(vars, false);
+        routeDoc = session.getDocument(routeDoc.getRef());
+        GraphRoute route = routeDoc.getAdapter(GraphRoute.class);
+        // but the global variable remained null
+        assertNull(route.getVariables().get("notAllowed"));
+        // and a warn was logged
+        events = logResult.getCaughtEvents();
+        assertEquals(1, events.size());
     }
 
 }

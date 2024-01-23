@@ -39,6 +39,7 @@ import org.nuxeo.ecm.core.api.CoreSession;
 import org.nuxeo.ecm.core.api.DocumentModel;
 import org.nuxeo.ecm.core.api.DocumentRef;
 import org.nuxeo.ecm.core.api.model.Property;
+import org.nuxeo.ecm.core.api.model.PropertyConversionException;
 import org.nuxeo.ecm.core.api.security.ACE;
 import org.nuxeo.ecm.core.api.security.ACL;
 import org.nuxeo.ecm.core.api.security.ACP;
@@ -51,6 +52,9 @@ import org.nuxeo.ecm.platform.web.common.vh.VirtualHostHelper;
 import org.nuxeo.runtime.api.Framework;
 
 import com.fasterxml.jackson.core.JsonGenerator;
+
+import net.htmlparser.jericho.Source;
+import net.htmlparser.jericho.TextExtractor;
 
 /**
  * JSon writer that outputs a format ready to eat by elasticsearch.
@@ -88,12 +92,18 @@ public class JsonESDocumentWriter {
             jg.writeStringField("ecm:parentId", parentRef.toString());
         }
         jg.writeStringField("ecm:currentLifeCycleState", doc.getCurrentLifeCycleState());
-        if (doc.isVersion()) {
+        if (doc.isVersion() || doc.isProxy()) {
             jg.writeStringField("ecm:versionLabel", doc.getVersionLabel());
             jg.writeStringField("ecm:versionVersionableId", doc.getVersionSeriesId());
+            jg.writeStringField("ecm:versionDescription", doc.getCheckinComment());
+            Calendar cd = doc.getCheckinDate();
+            if (cd != null) {
+                jg.writeStringField("ecm:versionCreated", cd.toInstant().toString());
+            }
         }
         if (doc.isProxy()) {
             jg.writeStringField("ecm:proxyVersionableId", doc.getVersionSeriesId());
+            jg.writeStringField("ecm:proxyTargetId", doc.getSourceId());
         }
         jg.writeBooleanField("ecm:isCheckedIn", !doc.isCheckedOut());
         jg.writeBooleanField("ecm:isProxy", doc.isProxy());
@@ -218,10 +228,35 @@ public class JsonESDocumentWriter {
                     + downloadService.getDownloadUrl(doc, null, null) + "/";
             writer.filesBaseUrl(blobUrlPrefix);
         }
-
-        for (Property p : properties) {
-            writer.writeProperty(jg, p);
+        if ("note".equals(schema) && "text/html".equals(doc.getPropertyValue("note:mime_type"))) {
+            Property mimeType = doc.getProperty("note:mime_type");
+            writer.writeProperty(jg, mimeType);
+            jg.writeFieldName("note:note");
+            String html = (String) doc.getPropertyValue("note:note");
+            jg.writeString(extractTextFromHtml(html));
+            return;
         }
+        for (Property p : properties) {
+            try {
+                writer.writeProperty(jg, p);
+            } catch (ClassCastException e) {
+                throw new PropertyConversionException(String.format("Corrupted property: %s, on document: %s", p, doc),
+                        e);
+            }
+        }
+    }
+
+    protected static String extractTextFromHtml(String html) {
+        if (StringUtils.isBlank(html)) {
+            return "";
+        }
+        Source source = new Source(html);
+        source.fullSequentialParse();
+        TextExtractor extractor = source.getTextExtractor();
+        extractor.setConvertNonBreakingSpaces(true);
+        extractor.setExcludeNonHTMLElements(true);
+        extractor.setIncludeAttributes(false);
+        return extractor.toString();
     }
 
 }

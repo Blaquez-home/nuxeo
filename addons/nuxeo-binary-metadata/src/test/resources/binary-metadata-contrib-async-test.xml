@@ -4,7 +4,7 @@
 
   <extension target="org.nuxeo.binary.metadata"
              point="metadataRules">
-    <rule id="default" order="0" enabled="true" async="false">
+    <rule id="default" order="0" enabled="true" async="true">
       <metadataMappings>
         <metadataMapping-id>PDF</metadataMapping-id>
       </metadataMappings>

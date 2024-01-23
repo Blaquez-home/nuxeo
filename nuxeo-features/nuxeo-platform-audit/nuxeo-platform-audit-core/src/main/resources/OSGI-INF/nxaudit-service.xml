@@ -104,7 +104,7 @@
 
   <extension-point name="bulk">
      <documentation>
-       CAUTION: Deprecated since 10.10-HF50-SNAPSHOT, audit bulker is now handled with nuxeo-stream, no replacement
+       CAUTION: Deprecated since 10.10-HF74-SNAPSHOT, audit bulker is now handled with nuxeo-stream, no replacement
       Allows to configure bulk processing
     </documentation>
 
@@ -135,6 +135,7 @@
     <event name="loginFailed" />
     <event name="logout" />
     <event name="documentCheckedIn" />
+    <event name="proxyRemoved" />
     <event name="versionRemoved" />
     <event name="documentProxyPublished" />
     <event name="sectionContentPublished" />

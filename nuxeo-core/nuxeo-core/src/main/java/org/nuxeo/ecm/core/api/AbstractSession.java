@@ -147,6 +147,9 @@ public abstract class AbstractSession implements CoreSession, Serializable {
 
     public static final String BINARY_TEXT_SYS_PROP = "fulltextBinary";
 
+    // @since 2021.17
+    public static final String RESTRICT_PROXY_CREATION_PROPERTY = "org.nuxeo.proxy.creation.restricted";
+
     private Boolean limitedResults;
 
     private Long maxResults;
@@ -613,6 +616,19 @@ public abstract class AbstractSession implements CoreSession, Serializable {
     @Override
     public void updateReadACLs(Collection<String> docIds) {
         getSession().updateReadACLs(docIds);
+        updateVersionsReadACLs(docIds);
+    }
+
+    protected void updateVersionsReadACLs(Collection<String> docIds) {
+        if (docIds.isEmpty()) {
+            return;
+        }
+        // update versions of the docs
+        String query = String.format("SELECT ecm:uuid FROM Document WHERE ecm:versionVersionableId IN ('%s')",
+                String.join("', '", docIds));
+        PartialList<Map<String, Serializable>> results = queryProjection(query, 0, 0);
+        List<String> versionIds = results.stream().map(m -> (String) m.get("ecm:uuid")).collect(Collectors.toList());
+        getSession().updateReadACLs(versionIds);
     }
 
     @Override
@@ -1399,9 +1415,6 @@ public abstract class AbstractSession implements CoreSession, Serializable {
                 return isAdministrator() ? null : "No working copy and not an Administrator";
             }
         } else {
-            if (isAdministrator()) {
-                return null; // ok
-            }
             if (!hasPermission(doc, REMOVE)) {
                 return "Missing permission '" + REMOVE + "' on document " + doc.getUUID();
             }
@@ -1442,32 +1455,36 @@ public abstract class AbstractSession implements CoreSession, Serializable {
         Map<String, Serializable> options = new HashMap<>();
         options.put("docTitle", docModel.getTitle());
         String versionLabel = "";
-        Document sourceDoc = null;
-        // notify different events depending on wether the document is a
-        // version or not
+        Document workingCopy = null;
+        // notify different events depending on whether the document is a version, a proxy or not
         if (!doc.isVersion()) {
+            if (doc.isProxy()) {
+                workingCopy = doc.getWorkingCopy();
+            }
             notifyEvent(DocumentEventTypes.ABOUT_TO_REMOVE, docModel, options, null, null, true, true);
             CoreService coreService = Framework.getService(CoreService.class);
             coreService.getVersionRemovalPolicy().removeVersions(getSession(), doc, this);
         } else {
             versionLabel = docModel.getVersionLabel();
-            sourceDoc = doc.getSourceDocument();
+            workingCopy = doc.getSourceDocument();
             notifyEvent(DocumentEventTypes.ABOUT_TO_REMOVE_VERSION, docModel, options, null, null, true, true);
-
         }
         doc.remove();
-        if (doc.isVersion()) {
-            if (sourceDoc != null) {
-                DocumentModel sourceDocModel = readModel(sourceDoc);
-                if (sourceDocModel != null) {
-                    options.put("comment", versionLabel); // to be used by
-                                                          // audit
-                    // service
-                    notifyEvent(DocumentEventTypes.VERSION_REMOVED, sourceDocModel, options, null, null, false, false);
+        if ((doc.isVersion() || doc.isProxy()) && workingCopy != null) {
+            DocumentModel workingCopyModel = readModel(workingCopy);
+            if (workingCopyModel != null) {
+                if (doc.isVersion()) {
+                    options.put("comment", versionLabel); // to be used by audit service
+                    notifyEvent(DocumentEventTypes.VERSION_REMOVED, workingCopyModel, options, null, null, false, false);
                     options.remove("comment");
+                } else if (doc.isProxy()) {
+                    notifyEvent(DocumentEventTypes.PROXY_REMOVED, workingCopyModel, options, null, null, false, false);
                 }
-                options.put("docSource", sourceDoc.getUUID());
             }
+            if (doc.isVersion()) {
+                options.put("docSource", workingCopy.getUUID()); // keep it for backward compatibility
+            }
+            options.put("workingCopy", workingCopy.getUUID());
         }
         notifyEvent(DocumentEventTypes.DOCUMENT_REMOVED, docModel, options, null, null, false, false);
     }
@@ -1581,10 +1598,11 @@ public abstract class AbstractSession implements CoreSession, Serializable {
             // compute auto versioning before update - here we create a version of document in order to save previous
             // state it's useful if we want to implement rules like create a version if last contributor is not the
             // same previous one. So we want to trigger this mechanism if and only if:
+            // - the document is not a record
             // - previous document is checkouted
             // - we don't ask for a version without updating the document (manual versioning only)
             // no need to fire event, as we use DocumentModel API it's already done
-            if (previousDocModel.isCheckedOut() && (!manualVersioning || dirty)) {
+            if (!docModel.isRecord() && previousDocModel.isCheckedOut() && (!manualVersioning || dirty)) {
                 getVersioningService().doAutomaticVersioning(previousDocModel, docModel, true);
             }
             // pre-save versioning
@@ -1622,7 +1640,7 @@ public abstract class AbstractSession implements CoreSession, Serializable {
             }
             if (manualVersioning) {
                 checkedInDoc = getVersioningService().doPostSave(this, doc, versioningOption, checkinComment, options);
-            } else {
+            } else if(!docModel.isRecord()) {
                 // compute auto versioning - only if it is not deactivated by manual versioning
                 // no need to fire event, as we use DocumentModel API it's already done
                 getVersioningService().doAutomaticVersioning(previousDocModel, docModel, false);
@@ -1636,6 +1654,9 @@ public abstract class AbstractSession implements CoreSession, Serializable {
             notifyCheckedInVersion(docModel, checkedInVersionRef, options, checkinComment);
         }
 
+        if (!dirty) {
+            options.putIfAbsent(DISABLE_AUDIT_LOGGER, true);
+        }
         notifyEvent(DocumentEventTypes.DOCUMENT_UPDATED, docModel, options, null, null, true, false);
         updateDocumentCount.inc();
 
@@ -1644,7 +1665,7 @@ public abstract class AbstractSession implements CoreSession, Serializable {
         if (proxies != null && !proxies.isEmpty()) {
             proxies.forEach(proxy -> {
                 DocumentModel docProxy = readModel(proxy);
-                if (!docProxy.isImmutable()) {
+                if (!docProxy.isImmutable() || allowVersionWrite) {
                     notifyEvent(DocumentEventTypes.DOCUMENT_PROXY_UPDATED, docProxy, options, null, null, true, false);
                 }
             });
@@ -1668,7 +1689,7 @@ public abstract class AbstractSession implements CoreSession, Serializable {
         checkPermission(doc, READ_VERSION);
         Document headDocument = doc.getSourceDocument();
         if (headDocument == null) {
-            throw new DocumentNotFoundException("Source document has been deleted");
+            throw new DocumentNotFoundException("Source document has been deleted for doc: " + docRef);
         }
         return readModel(headDocument);
     }
@@ -1959,7 +1980,10 @@ public abstract class AbstractSession implements CoreSession, Serializable {
     public DocumentModel createProxy(DocumentRef docRef, DocumentRef folderRef) {
         Document doc = resolveReference(docRef);
         Document fold = resolveReference(folderRef);
-        checkPermission(doc, READ);
+        boolean restricted = Framework.getService(ConfigurationService.class)
+                                      .isBooleanTrue(RESTRICT_PROXY_CREATION_PROPERTY);
+        String permission = restricted ? WRITE : READ;
+        checkPermission(doc, permission);
         checkPermission(fold, ADD_CHILDREN);
         return createProxyInternal(doc, fold, new HashMap<>());
     }
@@ -2560,10 +2584,7 @@ public abstract class AbstractSession implements CoreSession, Serializable {
         List<Document> proxies = getSession().getProxies(doc);
         proxies.forEach(proxy -> {
             DocumentModel docProxy = readModel(proxy);
-            if (!docProxy.isImmutable()) {
-                notifyEvent(DocumentEventTypes.DOCUMENT_PROXY_UPDATED, docProxy, new HashMap<>(), null, null, true,
-                        false);
-            }
+            notifyEvent(DocumentEventTypes.DOCUMENT_PROXY_UPDATED, docProxy, new HashMap<>(), null, null, true, false);
         });
     }
 

@@ -96,6 +96,8 @@ public class TestLoginScreenConfig {
         assertEquals(3, config.getProviders().size());
         assertTrue(config.hasVideos());
         assertEquals(2, config.getVideos().size());
+        assertTrue(config.getDisplayNews());
+        assertTrue(config.getDisplayMobileBanner());
 
         LoginVideo loginVideo = config.getVideos().get(0);
         assertTrue(isNotBlank(loginVideo.getType()));
@@ -152,6 +154,7 @@ public class TestLoginScreenConfig {
         assertNotNull(config.getProvider("facebook"));
         assertNotNull(config.getProvider("linkedin"));
         assertTrue(config.getDisplayNews());
+        assertTrue(config.getDisplayMobileBanner());
         assertNull(config.getDisableBackgroundSizeCover());
 
         assertEquals("XXXX", config.getProvider("google").getLink(null, null));
@@ -170,6 +173,7 @@ public class TestLoginScreenConfig {
         assertEquals("#DDDDDD", config.getHeaderStyle());
         assertEquals("Something", config.getFooterStyle());
         assertFalse(config.getDisplayNews());
+        assertFalse(config.getDisplayMobileBanner());
         assertEquals(2, config.getProviders().size());
         assertNotNull(config.getProvider("google"));
         assertNotNull(config.getProvider("linkedin"));
@@ -335,6 +339,7 @@ public class TestLoginScreenConfig {
     @Test
     public void testLoginProviderRegistrationNotOverriddenByContribution() throws Exception {
         LoginScreenConfig config = LoginScreenHelper.getConfig();
+        assertNotNull(config);
         assertEquals(3, config.getProviders().size());
 
         // dynamically register a login provider
@@ -391,10 +396,43 @@ public class TestLoginScreenConfig {
         query = UriComponent.decodeQuery(url.getQuery(), true);
 
         assertThat(query.keySet()).contains("why");
-        assertFalse(query.keySet().contains(PRODUCT_VERSION));
+        assertFalse(query.containsKey(PRODUCT_VERSION));
         assertThat(query.get("why")).contains("testing");
     }
 
+    // NXP-30831
+    @Test
+    public void testRemoveNewsDisplayMobileBannerMerge() throws Exception {
+        PluggableAuthenticationService authService = getAuthService();
+        LoginScreenConfig config = authService.getLoginScreenConfig();
+
+        assertNotNull(config);
+        assertTrue(config.getDisplayNews());
+        assertTrue(config.getDisplayMobileBanner());
+        assertEquals("someurl", config.getNewsIframeUrl());
+
+        hotDeployer.deploy("org.nuxeo.ecm.platform.web.common.test:OSGI-INF/test-loginscreenconfig-merge-removeNews-displayMobileBanner.xml");
+
+        authService = getAuthService();
+        config = authService.getLoginScreenConfig();
+
+        assertNotNull(config);
+        assertFalse(config.getDisplayNews());
+        assertFalse(config.getDisplayMobileBanner());
+        assertEquals("someurl", config.getNewsIframeUrl());
+
+        hotDeployer.deploy("org.nuxeo.ecm.platform.web.common.test:OSGI-INF/test-loginscreenconfig-merge-removeNews-displayMobileBanner2.xml");
+
+        authService = getAuthService();
+        config = authService.getLoginScreenConfig();
+
+        assertNotNull(config);
+        assertFalse(config.getDisplayNews());
+        assertFalse(config.getDisplayMobileBanner());
+        assertEquals("aNewURLWhichShouldntCauseNewsActivationAsRemoveNewsIsTrueInPreviousContrib", config.getNewsIframeUrl());
+    }
+
+    // this test should be the last one because it un-deploys a contribution deployed by annotation on the class
     @Test
     public void testUndeployConfig() throws Exception {
         PluggableAuthenticationService authService = getAuthService();

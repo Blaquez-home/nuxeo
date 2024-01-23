@@ -1,0 +1,31 @@
+image:
+  tag: "6.0.8"
+cluster:
+  enabled: false
+usePassword: false
+master:
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "16Mi"
+    limits:
+      cpu: "200m"
+      memory: "64Mi"
+  podLabels:
+    {{ tpl (readFile "labels.yaml.gotmpl") . | nindent 4 }}
+    dev.nuxeo.com/app: redis
+    dev.nuxeo.com/resource: pod
+  service:
+    labels:
+      {{ tpl (readFile "labels.yaml.gotmpl") . | nindent 6 }}
+      dev.nuxeo.com/app: redis
+      dev.nuxeo.com/resource: service
+  persistence:
+    enabled: false
+  tolerations:
+    - key: team
+      operator: Equal
+      value: platform
+      effect: NoSchedule
+  nodeSelector:
+    team: platform

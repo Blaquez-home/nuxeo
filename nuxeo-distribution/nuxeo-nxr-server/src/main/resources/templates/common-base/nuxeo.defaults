@@ -92,6 +92,9 @@ nuxeo.work.queue.common.threads=4
 # A dedicated queue for thumbnail
 nuxeo.work.queue.thumbnail.enabled=true
 nuxeo.work.queue.thumbnail.threads=4
+# Queue for DBS Read ACL Update
+nuxeo.work.queue.raclupdate.enabled=false
+nuxeo.work.queue.raclupdate.threads=4
 # Explicit timeout for thumbnail generation
 nuxeo.thumbnail.transaction.timeout.seconds=300
 # Explicit timeout for picture views generation
@@ -145,6 +148,8 @@ seqgen.elasticsearch.indexName=${elasticsearch.indexName}-uidgen
 audit.elasticsearch.migration=false
 # Batch size for audit logs migration, only useful with audit.elasticsearch.migration=true
 audit.elasticsearch.migration.batchSize=1000
+# Improve performance on getLatestLogId limiting events to the past 2 weeks, using elastic date syntax
+audit.elasticsearch.latestLogId.afterDate=now-14d/d
 # Refresh interval for the health check
 nuxeo.healthcheck.refresh.interval.seconds=20
 # Default request durability means that Elasticsearch is doing one fsync per request. With async durability it is one fsync every 5s.
@@ -152,7 +157,9 @@ elasticsearch.index.translog.durability=request
 # For the rest client, a timeout in milliseconds until a connection is established
 elasticsearch.restClient.connectionTimeoutMs=30000
 # For the rest client, a maximum period, in milliseconds, of inactivity between two consecutive data packets
-elasticsearch.restClient.socketTimeoutMs=20000
+elasticsearch.restClient.socketTimeoutMs=121000
+# For the rest client, a maximum timeout in milliseconds to honour in case of multiple retries of the same request
+elasticsearch.restClient.maxRetryTimeoutMs=60000
 # A username for client basic authentication
 elasticsearch.restClient.username=
 # A password for client basic authentication
@@ -169,6 +176,14 @@ elasticsearch.check.classpath=${nuxeo.home}/nxserver/lib:${nuxeo.home}/nxserver/
 elasticsearch.check.class=org.nuxeo.elasticsearch.ElasticSearchChecker
 # Nuxeo managing index alias
 elasticsearch.manageAlias.enabled=false
+# Bulk Index action, fetching content (bulk/index computation)
+elasticsearch.bulk.index.fetch.concurrency=4
+elasticsearch.bulk.index.fetch.partitions=12
+# Bulk Index action, submitting requests to elastic (bulk/bulkIndex computation)
+elasticsearch.bulk.index.submit.concurrency=2
+elasticsearch.bulk.index.submit.partitions=8
+
+
 
 # Kafka
 kafka.check.classpath=${nuxeo.home}/nxserver/lib:${nuxeo.home}/nxserver/bundles/nuxeo-{common,core-api,runtime-stream}*.jar
@@ -245,6 +260,7 @@ nuxeo.core.bulk.scroller.concurrencyMax=2
 nuxeo.core.bulk.status.concurrencyMax=2
 nuxeo.core.bulk.done.concurrencyMax=1
 nuxeo.core.bulk.csvExport.queryLimit=0
+nuxeo.core.bulk.csvExport.scroller=default
 
 # Stream Health Check probe activation
 nuxeo.stream.health.check.enabled=true
@@ -259,3 +275,47 @@ nuxeo.cors.allowSubdomains=true
 nuxeo.cors.supportedMethods=GET,POST,HEAD,OPTIONS,DELETE,PUT
 nuxeo.cors.urls=
 nuxeo.cors.pattern=/.*
+
+# Bulk Service Action concurrency and partitions
+nuxeo.bulk.action.attachRetentionRule.defaultConcurrency=2
+nuxeo.bulk.action.attachRetentionRule.defaultPartitions=4
+nuxeo.bulk.action.automation.defaultConcurrency=2
+nuxeo.bulk.action.automation.defaultPartitions=2
+nuxeo.bulk.action.csvExport.defaultConcurrency=2
+nuxeo.bulk.action.csvExport.defaultPartitions=2
+nuxeo.bulk.action.driveFireGroupUpdatedEvent.defaultConcurrency=2
+nuxeo.bulk.action.driveFireGroupUpdatedEvent.defaultPartitions=4
+nuxeo.bulk.action.evalInputEventBasedRule.defaultConcurrency=2
+nuxeo.bulk.action.evalInputEventBasedRule.defaultPartitions=4
+nuxeo.bulk.action.extractBinaryFulltext.defaultConcurrency=2
+nuxeo.bulk.action.extractBinaryFulltext.defaultPartitions=4
+nuxeo.bulk.action.holdDocumentsAction.defaultConcurrency=2
+nuxeo.bulk.action.holdDocumentsAction.defaultPartitions=4
+nuxeo.bulk.action.processRetentionEvent.defaultConcurrency=2
+nuxeo.bulk.action.processRetentionEvent.defaultPartitions=4
+nuxeo.bulk.action.recomputeThumbnails.defaultConcurrency=2
+nuxeo.bulk.action.recomputeThumbnails.defaultPartitions=6
+nuxeo.bulk.action.recomputeThumbnails.maxRetries=1
+nuxeo.bulk.action.recomputeViews.defaultConcurrency=2
+nuxeo.bulk.action.recomputeViews.defaultPartitions=6
+nuxeo.bulk.action.recomputeViews.maxRetries=1
+nuxeo.bulk.action.reindex.bulkIndex.concurrency=${elasticsearch.bulk.index.submit.concurrency}
+nuxeo.bulk.action.reindex.bulkIndex.partitions=${elasticsearch.bulk.index.submit.partitions}
+nuxeo.bulk.action.reindex.index.concurrency=${elasticsearch.bulk.index.fetch.concurrency}
+nuxeo.bulk.action.reindex.index.partitions=${elasticsearch.bulk.index.fetch.partitions}
+nuxeo.bulk.action.garbageCollectWokflows.defaultConcurrency=2
+nuxeo.bulk.action.garbageCollectWokflows.defaultPartitions=2
+nuxeo.bulk.action.removeProxy.defaultConcurrency=2
+nuxeo.bulk.action.removeProxy.defaultPartitions=2
+nuxeo.bulk.action.retentionExpired.defaultConcurrency=1
+nuxeo.bulk.action.retentionExpired.defaultPartitions=1
+nuxeo.bulk.action.setProperties.defaultConcurrency=2
+nuxeo.bulk.action.setProperties.defaultPartitions=2
+nuxeo.bulk.action.setSystemProperties.defaultConcurrency=2
+nuxeo.bulk.action.setSystemProperties.defaultPartitions=2
+nuxeo.bulk.action.trash.defaultConcurrency=1
+nuxeo.bulk.action.trash.defaultPartitions=1
+nuxeo.bulk.action.unholdDocumentsAction.defaultConcurrency=2
+nuxeo.bulk.action.unholdDocumentsAction.defaultPartitions=4
+nuxeo.bulk.action.updateReadAcls.defaultConcurrency=1
+nuxeo.bulk.action.updateReadAcls.defaultPartitions=1

@@ -19,6 +19,7 @@
 
 package org.nuxeo.ecm.platform.picture.listener;
 
+import static org.nuxeo.ecm.core.api.event.DocumentEventTypes.ABOUT_TO_CHECKIN;
 import static org.nuxeo.ecm.core.api.event.DocumentEventTypes.ABOUT_TO_CREATE;
 import static org.nuxeo.ecm.platform.picture.api.ImagingDocumentConstants.CTX_FORCE_VIEWS_GENERATION;
 import static org.nuxeo.ecm.platform.picture.api.ImagingDocumentConstants.PICTUREBOOK_TYPE_NAME;
@@ -74,13 +75,7 @@ public class PictureChangedListener implements EventListener {
         DocumentEventContext docCtx = (DocumentEventContext) ctx;
         DocumentModel doc = docCtx.getSourceDocument();
         if (doc.hasFacet(PICTURE_FACET) && !doc.isProxy()) {
-            Property fileProp = doc.getProperty("file:content");
-            Property viewsProp = doc.getProperty(AbstractPictureAdapter.VIEWS_PROPERTY);
-
-            boolean forceGeneration = Boolean.TRUE.equals(doc.getContextData(CTX_FORCE_VIEWS_GENERATION));
-            boolean noPictureViews = !viewsProp.isDirty() || viewsProp.size() == 0;
-            boolean fileChanged = ABOUT_TO_CREATE.equals(event.getName()) || fileProp.isDirty();
-            if (forceGeneration || (noPictureViews  && fileChanged)) {
+            if (triggersPictureViewsGeneration(event, doc)) {
                 preFillPictureViews(docCtx.getCoreSession(), doc);
             } else {
                 docCtx.setProperty(PictureViewsGenerationListener.DISABLE_PICTURE_VIEWS_GENERATION_LISTENER, true);
@@ -88,7 +83,22 @@ public class PictureChangedListener implements EventListener {
         }
     }
 
+    protected boolean triggersPictureViewsGeneration(Event event, DocumentModel doc) {
+        Property fileProp = doc.getProperty("file:content");
+        Property viewsProp = doc.getProperty(AbstractPictureAdapter.VIEWS_PROPERTY);
+
+        boolean forceGeneration = Boolean.TRUE.equals(doc.getContextData(CTX_FORCE_VIEWS_GENERATION));
+        boolean emptyPictureViews = viewsProp.size() == 0;
+        boolean emptyOrNotDirtyPictureViews = !viewsProp.isDirty() || emptyPictureViews;
+        boolean fileChanged = ABOUT_TO_CREATE.equals(event.getName()) || fileProp.isDirty();
+        boolean aboutToCheckIn = ABOUT_TO_CHECKIN.equals(event.getName());
+
+        return forceGeneration || (emptyOrNotDirtyPictureViews && fileChanged) || (emptyPictureViews && aboutToCheckIn);
+    }
+
     protected void preFillPictureViews(CoreSession session, DocumentModel doc) {
+        PictureResourceAdapter adapter = doc.getAdapter(PictureResourceAdapter.class);
+        adapter.clearInfo();
         try {
             URL fileUrl = Thread.currentThread().getContextClassLoader().getResource(getEmptyPicturePath());
             if (fileUrl == null) {
@@ -118,7 +128,6 @@ public class PictureChangedListener implements EventListener {
                 emptyPictureImageInfo = imagingService.getImageInfo(blob);
             }
 
-            PictureResourceAdapter adapter = doc.getAdapter(PictureResourceAdapter.class);
             adapter.preFillPictureViews(blob, pictureConversions, emptyPictureImageInfo);
         } catch (IOException e) {
             log.error("Error while pre-filling picture views: " + e.getMessage(), e);

@@ -69,7 +69,7 @@ public class DocumentModelCSVWriterTest extends AbstractCSVWriterTest.Local<Docu
     @Before
     public void setup() {
         document = session.createDocumentModel("/", "myDoc", "File");
-        document.setPropertyValue("dc:description", "There is a , in the description");
+        document.setPropertyValue("dc:description", "There is a , in the description"); // NOSONAR
         document.setPropertyValue("dc:contributors", new String[] { "John", "Jane" });
         document.setPropertyValue("dc:nature", "article");
         document.setPropertyValue("dc:coverage", "europe/France");
@@ -86,7 +86,7 @@ public class DocumentModelCSVWriterTest extends AbstractCSVWriterTest.Local<Docu
     }
 
     @Test
-    public void testDefault() throws Exception {
+    public void testDefault() throws IOException {
         RenderingContext renderingCtx = RenderingContext.CtxBuilder.get();
         renderingCtx.setParameterValues(SCHEMAS_CTX_DATA, Arrays.asList("dublincore"));
         CSVAssert csv = csvAssert(document, renderingCtx);
@@ -110,7 +110,7 @@ public class DocumentModelCSVWriterTest extends AbstractCSVWriterTest.Local<Docu
         csv.has("dc:coverage[label]").isEquals("France");
         csv.has("isRecord").isTrue();
         String expectedRetainUntil = ((GregorianCalendar) retainUntil).toZonedDateTime().toString();
-        csv.has("retainUntil").isEquals(expectedRetainUntil );
+        csv.has("retainUntil").isEquals(expectedRetainUntil);
         csv.has("hasLegalHold").isTrue();
         csv.has("isUnderRetentionOrLegalHold").isTrue();
     }
@@ -137,7 +137,7 @@ public class DocumentModelCSVWriterTest extends AbstractCSVWriterTest.Local<Docu
 
     @Test
     @Deploy("org.nuxeo.ecm.platform.csv.export.test:OSGI-INF/doc-type-with-vocabulary-contrib.xml")
-    public void testVocabularyPropertyNotFound() throws Exception {
+    public void testVocabularyPropertyNotFound() throws IOException {
         RenderingContext renderingCtx = RenderingContext.CtxBuilder.get();
         renderingCtx.setParameterValues(SCHEMAS_CTX_DATA, Collections.singletonList("coverage"));
         CSVAssert csv = csvAssert(document, renderingCtx);
@@ -146,7 +146,7 @@ public class DocumentModelCSVWriterTest extends AbstractCSVWriterTest.Local<Docu
     }
 
     @Test
-    public void testNewlineReplacement() throws Exception {
+    public void testNewlineReplacement() throws IOException {
         document.setPropertyValue("dc:description", "There is a \n in the description");
         session.saveDocument(document);
 
@@ -159,4 +159,43 @@ public class DocumentModelCSVWriterTest extends AbstractCSVWriterTest.Local<Docu
         csv = csvAssert(document, renderingCtx);
         csv.has("dc:description").isEquals("There is a  $$  in the description");
     }
+
+    // NXP-30590
+    @Test
+    public void testForbiddenCharacterRemoval() throws IOException {
+        // check each forbidden character at the beginning
+        document.setPropertyValue("dc:title", "=formula");
+        document.setPropertyValue("dc:description", "+sum");
+        document.setPropertyValue("dc:rights", "-substraction");
+        document.setPropertyValue("dc:source", "@at");
+        document.setPropertyValue("dc:format", "	tabulation");
+        document.setPropertyValue("dc:language", "\rcarriage return");
+        session.saveDocument(document);
+
+        RenderingContext renderingCtx = RenderingContext.CtxBuilder.get();
+        renderingCtx.setParameterValues(SCHEMAS_CTX_DATA, Collections.singletonList("dublincore"));
+        CSVAssert csv = csvAssert(document, renderingCtx);
+        // check system field
+        csv.has("title").isEquals("formula");
+        // check property fields
+        csv.has("dc:title").isEquals("formula");
+        csv.has("dc:description").isEquals("sum");
+        csv.has("dc:rights").isEquals("substraction");
+        csv.has("dc:source").isEquals("at");
+        csv.has("dc:format").isEquals("tabulation");
+        csv.has("dc:language").isEquals("carriage return");
+
+        // check multiple forbidden characters at the beginning
+        document.setPropertyValue("dc:description", "=++-@+@=\t\r\tmix");
+        session.saveDocument(document);
+        csv = csvAssert(document, renderingCtx);
+        csv.has("dc:description").isEquals("mix");
+
+        // check that characters not at the beginning are not removed
+        document.setPropertyValue("dc:description", "for=+-@\t\rmula");
+        session.saveDocument(document);
+        csv = csvAssert(document, renderingCtx);
+        csv.has("dc:description").isEquals("for=+-@\t\rmula");
+    }
+
 }

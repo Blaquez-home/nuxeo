@@ -20,7 +20,9 @@ package org.nuxeo.ecm.blob.s3;
 
 import static org.apache.commons.lang3.StringUtils.isBlank;
 import static org.apache.commons.lang3.StringUtils.isNotBlank;
-import static org.nuxeo.ecm.blob.s3.S3BlobStoreConfiguration.DISABLE_PROXY_PROPERTY;
+import static org.nuxeo.common.concurrent.ThreadFactories.newThreadFactory;
+import static org.nuxeo.ecm.core.blob.BlobProviderDescriptor.RECORD;
+import static org.nuxeo.ecm.core.model.Session.PROP_RETENTION_COMPLIANCE_MODE_ENABLED;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -35,6 +37,7 @@ import java.time.Duration;
 import java.util.Date;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.Executors;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -43,6 +46,7 @@ import org.nuxeo.ecm.blob.CloudBlobStoreConfiguration;
 import org.nuxeo.ecm.core.api.NuxeoException;
 import org.nuxeo.ecm.core.storage.sql.S3Utils;
 import org.nuxeo.runtime.api.Framework;
+import org.nuxeo.runtime.aws.AWSConfigurationService;
 import org.nuxeo.runtime.aws.NuxeoAWSRegionProvider;
 import org.nuxeo.runtime.services.config.ConfigurationService;
 
@@ -55,13 +59,12 @@ import com.amazonaws.services.s3.AmazonS3Builder;
 import com.amazonaws.services.s3.AmazonS3ClientBuilder;
 import com.amazonaws.services.s3.AmazonS3EncryptionClientBuilder;
 import com.amazonaws.services.s3.model.CryptoConfiguration;
-import com.amazonaws.services.s3.model.DefaultRetention;
 import com.amazonaws.services.s3.model.EncryptionMaterials;
 import com.amazonaws.services.s3.model.GetObjectLockConfigurationRequest;
 import com.amazonaws.services.s3.model.GetObjectLockConfigurationResult;
 import com.amazonaws.services.s3.model.ObjectLockConfiguration;
+import com.amazonaws.services.s3.model.ObjectLockEnabled;
 import com.amazonaws.services.s3.model.ObjectLockRetentionMode;
-import com.amazonaws.services.s3.model.ObjectLockRule;
 import com.amazonaws.services.s3.model.StaticEncryptionMaterialsProvider;
 import com.amazonaws.services.s3.transfer.TransferManager;
 import com.amazonaws.services.s3.transfer.TransferManagerBuilder;
@@ -80,6 +83,8 @@ public class S3BlobStoreConfiguration extends CloudBlobStoreConfiguration {
     public static final String BUCKET_NAME_PROPERTY = "bucket";
 
     public static final String BUCKET_PREFIX_PROPERTY = "bucket_prefix";
+
+    public static final String BUCKET_SUB_DIRS_DEPTH_PROPERTY = "subDirsDepth";
 
     public static final String BUCKET_REGION_PROPERTY = "region";
 
@@ -133,9 +138,79 @@ public class S3BlobStoreConfiguration extends CloudBlobStoreConfiguration {
     public static final String DELIMITER = "/";
 
     /**
-     * The configuration property to define the multipart copy part size.
+     * The deprecated configuration property to define the multipart copy part size, for backward compatibility.
+     *
+     * @since 2021.11
      */
-    public static final String MULTIPART_COPY_PART_SIZE_PROPERTY = "nuxeo.s3.multipart.copy.part.size";
+    public static final String MULTIPART_COPY_PART_SIZE_CONFIGURATION_PROPERTY = "nuxeo.s3.multipart.copy.part.size";
+
+    /**
+     * The Framework property to define the multipart copy part size.
+     */
+    public static final String MULTIPART_COPY_PART_SIZE_PROPERTY = "nuxeo.s3storage.multipart.copy.part.size";
+
+    /**
+     * The default value for the multipart copy part size.
+     *
+     * @since 2021.11
+     */
+    public static final long MULTIPART_COPY_PART_SIZE_DEFAULT = 5L * 1024 * 1024; // 5 MB;
+
+    /**
+     * The Framework property to define the multipart copy threshold.
+     *
+     * @since 2021.11
+     */
+    public static final String MULTIPART_COPY_THRESHOLD_PROPERTY = "nuxeo.s3storage.multipart.copy.threshold";
+
+    /**
+     * The default value for the multipart copy threshold.
+     *
+     * @since 2021.11
+     */
+    public static final long MULTIPART_COPY_THRESHOLD_DEFAULT = 5L * 1024 * 1024 * 1024; // AWS SDK default = 5 GB
+
+    /**
+     * The Framework property to define the multipart upload threshold.
+     *
+     * @since 2021.11
+     */
+    public static final String MULTIPART_UPLOAD_THRESHOLD_PROPERTY = "nuxeo.s3storage.multipart.upload.threshold";
+
+    /**
+     * The default value for the multipart upload threshold.
+     *
+     * @since 2021.11
+     */
+    public static final long MULTIPART_UPLOAD_THRESHOLD_DEFAULT = 16L * 1024 * 1024; // AWS SDK default = 16 MB;
+
+    /**
+     * The Framework property to define the minimum upload part size.
+     *
+     * @since 2021.11
+     */
+    public static final String MINIMUM_UPLOAD_PART_SIZE_PROPERTY = "nuxeo.s3storage.minimum.upload.part.size";
+
+    /**
+     * The default value for the minimum upload part size.
+     *
+     * @since 2021.11
+     */
+    public static final long MINIMUM_UPLOAD_PART_SIZE_DEFAULT = 5L * 1024 * 1024; // AWS SDK default = 5 MB
+
+    /**
+     * The Framework property to define the transfer manager thread pool size.
+     *
+     * @since 10.10-HF57
+     */
+    public static final String TRANSFER_MANAGER_THREAD_POOL_SIZE_PROPERTY = "nuxeo.s3storage.transfer.manager.thread.pool.size";
+
+    /**
+     * The default value for the transfer manager thread pool size.
+     *
+     * @since 10.10-HF57
+     */
+    public static final int TRANSFER_MANAGER_THREAD_POOL_SIZE_DEFAULT = 10;
 
     /**
      * Framework property to disable usage of the proxy environment variables ({@code nuxeo.http.proxy.*}) for the
@@ -144,8 +219,6 @@ public class S3BlobStoreConfiguration extends CloudBlobStoreConfiguration {
      * @since 11.1
      */
     public static final String DISABLE_PROXY_PROPERTY = "nuxeo.s3.proxy.disabled";
-
-    public static final ObjectLockRetentionMode DEFAULT_RETENTION_MODE = ObjectLockRetentionMode.GOVERNANCE;
 
     public final CloudFrontConfiguration cloudFront;
 
@@ -166,11 +239,11 @@ public class S3BlobStoreConfiguration extends CloudBlobStoreConfiguration {
     public final boolean metadataAddUsername;
 
     /**
-     * The retention mode with which the bucket is configured.
+     * Is Object Lock feature enabled at s3 level.
      *
-     * @since 11.4
+     * @since 2021.13
      */
-    public final ObjectLockRetentionMode bucketRetentionMode;
+    public final boolean s3RetentionEnabled;
 
     /**
      * The retention mode to use when setting the retention on an object.
@@ -219,8 +292,14 @@ public class S3BlobStoreConfiguration extends CloudBlobStoreConfiguration {
         amazonS3 = getAmazonS3(s3Builder);
 
         metadataAddUsername = getBooleanProperty(METADATA_ADD_USERNAME_PROPERTY);
-        bucketRetentionMode = computeBucketRetentionMode();
-        retentionMode = bucketRetentionMode == null ? DEFAULT_RETENTION_MODE : bucketRetentionMode;
+
+        s3RetentionEnabled = isS3RetentionEnabled();
+        retentionMode = Framework.isBooleanPropertyTrue(PROP_RETENTION_COMPLIANCE_MODE_ENABLED)
+                ? ObjectLockRetentionMode.COMPLIANCE
+                : ObjectLockRetentionMode.GOVERNANCE;
+        if (!s3RetentionEnabled && Boolean.parseBoolean(properties.get(RECORD))) {
+            log.warn("Blob provider is configured for records but retention is not enabled on s3 bucket {}", bucketName);
+        }
 
         transferManager = createTransferManager();
 
@@ -236,6 +315,38 @@ public class S3BlobStoreConfiguration extends CloudBlobStoreConfiguration {
 
     public void close() {
         transferManager.shutdownNow();
+    }
+
+    /**
+     * @since 2021.11
+     */
+    public static long getMultipartCopyPartSize() {
+        // backward compatibility with configuration service property
+        ConfigurationService configurationService = Framework.getService(ConfigurationService.class);
+        if (configurationService != null) {
+            Optional<Long> optional = configurationService.getLong(MULTIPART_COPY_PART_SIZE_CONFIGURATION_PROPERTY);
+            if (optional.isPresent()) {
+                return optional.get();
+            }
+        }
+        // nuxeo.conf property
+        return getLongProperty(MULTIPART_COPY_PART_SIZE_PROPERTY, MULTIPART_COPY_PART_SIZE_DEFAULT);
+    }
+
+    /**
+     * @since 2021.11
+     */
+    public static long getLongProperty(String key, long defaultValue) {
+        String value = Framework.getProperty(key);
+        if (value == null) {
+            return defaultValue;
+        }
+        try {
+            return Long.parseLong(value);
+        } catch (NumberFormatException e) {
+            log.error("Invalid framework property: {}={}, expecting a long value.", key, value, e);
+            return defaultValue;
+        }
     }
 
     @Override
@@ -287,6 +398,14 @@ public class S3BlobStoreConfiguration extends CloudBlobStoreConfiguration {
         return value;
     }
 
+    protected int getSubDirsDepth() {
+        int d = getIntProperty(BUCKET_SUB_DIRS_DEPTH_PROPERTY);
+        if (d < 0) {
+            d = 0;
+        }
+        return d;
+    }
+
     protected AWSCredentialsProvider getAWSCredentialsProvider() {
         String awsID = getProperty(AWS_ID_PROPERTY);
         String awsSecret = getProperty(AWS_SECRET_PROPERTY);
@@ -330,6 +449,10 @@ public class S3BlobStoreConfiguration extends CloudBlobStoreConfiguration {
         }
         if (socketTimeout >= 0) { // 0 is allowed
             clientConfiguration.setSocketTimeout(socketTimeout);
+        }
+        AWSConfigurationService service = Framework.getService(AWSConfigurationService.class);
+        if (service != null) {
+            service.configureSSL(clientConfiguration);
         }
         return clientConfiguration;
     }
@@ -406,49 +529,45 @@ public class S3BlobStoreConfiguration extends CloudBlobStoreConfiguration {
     }
 
     protected TransferManager createTransferManager() {
-        long minimumUploadPartSize = 5L * 1024 * 1024; // AWS SDK default = 5 MB
-        long multipartUploadThreshold = 16L * 1024 * 1024; // AWS SDK default = 16 MB
-        long multipartCopyThreshold = 5L * 1024 * 1024 * 1024; // AWS SDK default = 5 GB
-        long multipartCopyPartSize = 100L * 1024 * 1024; // AWS SDK default = 100 MB
-        ConfigurationService configurationService = Framework.getService(ConfigurationService.class);
-        if (configurationService != null) {
-            multipartCopyPartSize = configurationService.getLong(MULTIPART_COPY_PART_SIZE_PROPERTY,
-                    multipartCopyPartSize);
-        }
         // when the bucket has Object Lock active, uploads need to provide an MD5
-        boolean alwaysCalculateMultipartMd5 = bucketRetentionMode != null;
+        boolean alwaysCalculateMultipartMd5 = s3RetentionEnabled;
         return TransferManagerBuilder.standard()
                                      .withS3Client(amazonS3)
-                                     .withMinimumUploadPartSize(Long.valueOf(minimumUploadPartSize))
-                                     .withMultipartUploadThreshold(Long.valueOf(multipartUploadThreshold))
-                                     .withMultipartCopyThreshold(Long.valueOf(multipartCopyThreshold))
-                                     .withMultipartCopyPartSize(Long.valueOf(multipartCopyPartSize))
+                                     .withMinimumUploadPartSize(Long.valueOf(getLongProperty(
+                                             MINIMUM_UPLOAD_PART_SIZE_PROPERTY, MINIMUM_UPLOAD_PART_SIZE_DEFAULT)))
+                                     .withMultipartUploadThreshold(Long.valueOf(getLongProperty(
+                                             MULTIPART_UPLOAD_THRESHOLD_PROPERTY, MULTIPART_UPLOAD_THRESHOLD_DEFAULT)))
+                                     .withMultipartCopyThreshold(Long.valueOf(getLongProperty(
+                                             MULTIPART_COPY_THRESHOLD_PROPERTY, MULTIPART_COPY_THRESHOLD_DEFAULT)))
+                                     .withMultipartCopyPartSize(Long.valueOf(getMultipartCopyPartSize()))
                                      .withAlwaysCalculateMultipartMd5(alwaysCalculateMultipartMd5)
+                                     .withExecutorFactory(() -> Executors.newFixedThreadPool(
+                                             (int) getLongProperty(TRANSFER_MANAGER_THREAD_POOL_SIZE_PROPERTY,
+                                                     TRANSFER_MANAGER_THREAD_POOL_SIZE_DEFAULT),
+                                             newThreadFactory("s3-transfer-manager-worker")))
                                      .build();
     }
 
     /** @deprecated since 11.4, unused */
     @Deprecated
     protected ObjectLockRetentionMode getRetentionMode() {
-        ObjectLockRetentionMode bucketRetentionMode = computeBucketRetentionMode();
-        return bucketRetentionMode == null ? DEFAULT_RETENTION_MODE : bucketRetentionMode;
+        return retentionMode;
     }
 
-    protected ObjectLockRetentionMode computeBucketRetentionMode() {
+    protected boolean isS3RetentionEnabled() {
         GetObjectLockConfigurationRequest request = new GetObjectLockConfigurationRequest().withBucketName(bucketName);
         GetObjectLockConfigurationResult result;
         try {
             result = amazonS3.getObjectLockConfiguration(request);
         } catch (AmazonServiceException e) {
             log.debug("Failed to get ObjectLockConfiguration for bucket: {}", bucketName, e);
-            return null;
+            return false;
         }
-        return Optional.ofNullable(result.getObjectLockConfiguration())
-                       .map(ObjectLockConfiguration::getRule)
-                       .map(ObjectLockRule::getDefaultRetention)
-                       .map(DefaultRetention::getMode)
-                       .map(ObjectLockRetentionMode::valueOf)
-                       .orElse(null);
+        ObjectLockConfiguration olc = result.getObjectLockConfiguration();
+        if (olc != null) {
+            return ObjectLockEnabled.ENABLED.toString().equals(olc.getObjectLockEnabled());
+        }
+        return false;
     }
 
     /**
@@ -474,7 +593,7 @@ public class S3BlobStoreConfiguration extends CloudBlobStoreConfiguration {
             log.debug("Cleanup done for bucket: {}", bucketName);
         } catch (AmazonServiceException e) {
             if (e.getStatusCode() == 400 || e.getStatusCode() == 404) {
-                log.warn("Aborting old uploads is not supported by this provider");
+                log.warn("Aborting old uploads is not supported by this provider", e);
                 return;
             }
             throw new NuxeoException("Failed to abort old uploads", e);

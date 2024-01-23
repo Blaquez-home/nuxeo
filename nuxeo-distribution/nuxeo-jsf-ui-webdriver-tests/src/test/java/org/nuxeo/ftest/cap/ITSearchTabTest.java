@@ -37,6 +37,7 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Ignore;
 import org.junit.Test;
 import org.nuxeo.ecm.core.api.security.SecurityConstants;
 import org.nuxeo.functionaltests.AbstractTest;
@@ -63,13 +64,14 @@ import org.openqa.selenium.WebElement;
 /**
  * @since 6.0
  */
+@Ignore("NXP-32153")
 public class ITSearchTabTest extends AbstractTest {
 
-    private final static String WORKSPACE1_TITLE = ITSearchTabTest.class.getSimpleName() + "_WorkspaceTitle1_"
-            + new Date().getTime();
+    private final static String WORKSPACE1_TITLE = ITSearchTabTest.class.getSimpleName() + "_WS1_"
+            + (new Date().getTime() % 10000);
 
-    private final static String WORKSPACE2_TITLE = ITSearchTabTest.class.getSimpleName() + "_WorkspaceTitle2_"
-            + new Date().getTime();
+    private final static String WORKSPACE2_TITLE = ITSearchTabTest.class.getSimpleName() + "_WS2_"
+            + (new Date().getTime() % 10000);
 
     private static final String SEARCH_PATH = "/Domain/Workspaces/" + WORKSPACE1_TITLE;
 

@@ -59,6 +59,7 @@ import org.nuxeo.ecm.core.blob.ManagedBlob;
 import org.nuxeo.ecm.core.blob.binary.BinaryGarbageCollector;
 import org.nuxeo.ecm.core.blob.binary.FileStorage;
 import org.nuxeo.runtime.api.Framework;
+import org.nuxeo.runtime.aws.AWSConfigurationService;
 import org.nuxeo.runtime.aws.NuxeoAWSRegionProvider;
 
 import com.amazonaws.AmazonClientException;
@@ -315,6 +316,11 @@ public class S3BinaryManager extends AbstractCloudBinaryManager implements S3Man
             clientConfiguration.setSocketTimeout(socketTimeout);
         }
 
+        AWSConfigurationService service = Framework.getService(AWSConfigurationService.class);
+        if (service != null) {
+            service.configureSSL(clientConfiguration);
+        }
+
         // set up encryption
         encryptionMaterials = null;
         if (isNotBlank(keystoreFile)) {
@@ -477,7 +483,7 @@ public class S3BinaryManager extends AbstractCloudBinaryManager implements S3Man
     }
 
     /** @return object length, or -1 if missing */
-    protected long lengthOfBlob(String digest) {
+    public long lengthOfBlob(String digest) {
         String bucketKey = bucketNamePrefix + digest;
         try {
             ObjectMetadata metadata = amazonS3.getObjectMetadata(bucketName, bucketKey);
